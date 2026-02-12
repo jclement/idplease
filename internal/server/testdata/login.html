@@ -1,0 +1,6 @@
+<!DOCTYPE html><html><body>
+{{if .Error}}<div>{{.Error}}</div>{{end}}
+<form method="POST" action="{{.Action}}">
+{{range $k, $v := .HiddenFields}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
+<input name="username"><input name="password"><button>Sign In</button>
+</form></body></html>

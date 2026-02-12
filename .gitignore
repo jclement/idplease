@@ -1,0 +1,27 @@
+# Binaries
+idplease
+*.exe
+*.dll
+*.so
+*.dylib
+dist/
+
+# Data files
+users.json
+idplease-key.json
+idplease.json
+
+# Test
+*.test
+*.out
+coverage.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
