@@ -16,15 +16,37 @@ type Config struct {
 	AdminKey string `json:"adminKey"`
 
 	// OIDC settings (from SQLite, with defaults)
-	Issuer        string            `json:"-"`
-	BasePath      string            `json:"-"`
-	RedirectURIs  []string          `json:"-"`
-	ClientIDs     []string          `json:"-"`
-	TenantID      string            `json:"-"`
-	TokenLifetime int               `json:"-"`
-	SessionSecret string            `json:"-"`
-	GroupMapping  map[string]string `json:"-"`
-	DisplayName   string            `json:"-"`
+	Issuer               string            `json:"-"`
+	BasePath             string            `json:"-"`
+	RedirectURIs         []string          `json:"-"`
+	ClientIDs            []string          `json:"-"`
+	TenantID             string            `json:"-"`
+	TokenLifetime        int               `json:"-"` // Deprecated: use AccessTokenLifetime
+	AccessTokenLifetime  int               `json:"-"` // seconds, default 300 (5 min)
+	RefreshTokenLifetime int               `json:"-"` // seconds, default 86400 (24 hr)
+	SessionSecret        string            `json:"-"`
+	GroupMapping         map[string]string `json:"-"`
+	DisplayName          string            `json:"-"`
+}
+
+// GetAccessTokenLifetime returns the access token lifetime in seconds
+func (c *Config) GetAccessTokenLifetime() int {
+	if c.AccessTokenLifetime > 0 {
+		return c.AccessTokenLifetime
+	}
+	// Fall back to legacy TokenLifetime
+	if c.TokenLifetime > 0 {
+		return c.TokenLifetime
+	}
+	return 300 // 5 minutes default
+}
+
+// GetRefreshTokenLifetime returns the refresh token lifetime in seconds
+func (c *Config) GetRefreshTokenLifetime() int {
+	if c.RefreshTokenLifetime > 0 {
+		return c.RefreshTokenLifetime
+	}
+	return 86400 // 24 hours default
 }
 
 func (c *Config) GetClientIDs() []string {
@@ -45,7 +67,7 @@ func (c *Config) IsValidClientID(id string) bool {
 
 func (c *Config) IsValidRedirectURI(uri string) bool {
 	if len(c.RedirectURIs) == 0 {
-		return true // default: allow all
+		return true
 	}
 	for _, allowed := range c.RedirectURIs {
 		if allowed == "*" {
@@ -72,19 +94,17 @@ func (c *Config) NormalizedBasePath() string {
 	return bp
 }
 
-// Load reads server-level settings from the JSON config file.
-// OIDC settings will be loaded from SQLite separately.
 func Load(path string) (*Config, error) {
 	cfg := &Config{
-		Port:          8080,
-		KeyFile:       "idplease-key.json",
-		DBFile:        "idplease.db",
-		// Defaults for OIDC settings (used if not in SQLite)
-		Issuer:        "http://localhost:8080",
-		BasePath:      "/",
-		RedirectURIs:  []string{"*"},
-		TokenLifetime: 3600,
-		DisplayName:   "IDPlease",
+		Port:                 8080,
+		KeyFile:              "idplease-key.json",
+		DBFile:               "idplease.db",
+		Issuer:               "http://localhost:8080",
+		BasePath:             "/",
+		RedirectURIs:         []string{"*"},
+		AccessTokenLifetime:  300,
+		RefreshTokenLifetime: 86400,
+		DisplayName:          "IDPlease",
 	}
 
 	data, err := os.ReadFile(path)
@@ -96,7 +116,6 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Parse the JSON file - it may contain legacy fields
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -116,7 +135,7 @@ func Load(path string) (*Config, error) {
 		_ = json.Unmarshal(v, &cfg.AdminKey)
 	}
 
-	// Also read legacy fields for migration support
+	// Legacy/OIDC fields
 	if v, ok := raw["issuer"]; ok {
 		_ = json.Unmarshal(v, &cfg.Issuer)
 	}
@@ -127,7 +146,6 @@ func Load(path string) (*Config, error) {
 		_ = json.Unmarshal(v, &cfg.RedirectURIs)
 	}
 	if v, ok := raw["clientID"]; ok {
-		// Can be string or []string
 		var single string
 		if err := json.Unmarshal(v, &single); err == nil {
 			cfg.ClientIDs = []string{single}
@@ -143,6 +161,12 @@ func Load(path string) (*Config, error) {
 	}
 	if v, ok := raw["tokenLifetime"]; ok {
 		_ = json.Unmarshal(v, &cfg.TokenLifetime)
+	}
+	if v, ok := raw["accessTokenLifetime"]; ok {
+		_ = json.Unmarshal(v, &cfg.AccessTokenLifetime)
+	}
+	if v, ok := raw["refreshTokenLifetime"]; ok {
+		_ = json.Unmarshal(v, &cfg.RefreshTokenLifetime)
 	}
 	if v, ok := raw["sessionSecret"]; ok {
 		_ = json.Unmarshal(v, &cfg.SessionSecret)
@@ -160,9 +184,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 8080
 	}
-	if cfg.TokenLifetime == 0 {
-		cfg.TokenLifetime = 3600
-	}
 	if cfg.KeyFile == "" {
 		cfg.KeyFile = "idplease-key.json"
 	}
@@ -173,7 +194,6 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// LoadFromStore loads OIDC configuration from the SQLite store, falling back to cfg defaults
 func (c *Config) LoadFromStore(getConfig func(key string) (string, error), getSlice func(key string) ([]string, error), getMap func(key string) (map[string]string, error)) {
 	if v, err := getConfig("issuer"); err == nil && v != "" {
 		c.Issuer = v
@@ -194,6 +214,18 @@ func (c *Config) LoadFromStore(getConfig func(key string) (string, error), getSl
 		var tl int
 		if err := json.Unmarshal([]byte(v), &tl); err == nil && tl > 0 {
 			c.TokenLifetime = tl
+		}
+	}
+	if v, err := getConfig("access_token_lifetime"); err == nil && v != "" {
+		var tl int
+		if err := json.Unmarshal([]byte(v), &tl); err == nil && tl > 0 {
+			c.AccessTokenLifetime = tl
+		}
+	}
+	if v, err := getConfig("refresh_token_lifetime"); err == nil && v != "" {
+		var tl int
+		if err := json.Unmarshal([]byte(v), &tl); err == nil && tl > 0 {
+			c.RefreshTokenLifetime = tl
 		}
 	}
 	if v, err := getSlice("client_ids"); err == nil && len(v) > 0 {

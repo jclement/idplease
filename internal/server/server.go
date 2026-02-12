@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jclement/idplease/internal/admin"
 	"github.com/jclement/idplease/internal/config"
 	"github.com/jclement/idplease/internal/oidc"
@@ -28,10 +29,8 @@ func New(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates 
 }
 
 func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates embed.FS, adminKey string) (*Server, error) {
-	// Parse templates with funcmap
 	tmpl, err := admin.ParseTemplates(templates)
 	if err != nil {
-		// Fallback to testdata for tests
 		tmpl, err = admin.ParseTestTemplates(templates)
 		if err != nil {
 			return nil, fmt.Errorf("parse templates: %w", err)
@@ -53,12 +52,10 @@ func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store
 	srv.mux.HandleFunc(bp+"authorize", srv.authorizeHandler)
 	srv.mux.HandleFunc(bp+"token", provider.TokenHandler())
 
-	// Also handle discovery at the standard path if basePath is not /
 	if bp != "/" {
 		srv.mux.HandleFunc("/.well-known/openid-configuration", provider.DiscoveryHandler())
 	}
 
-	// Register admin routes if admin key is set
 	if adminKey != "" {
 		a := admin.New(cfg, s, tmpl, adminKey)
 		srv.admin = a
@@ -71,7 +68,21 @@ func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	slog.Info("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+	// Assign request ID
+	reqID := r.Header.Get("X-Request-ID")
+	if reqID == "" {
+		reqID = uuid.New().String()[:8]
+	}
+	r.Header.Set("X-Request-ID", reqID)
+	w.Header().Set("X-Request-ID", reqID)
+
+	slog.Info("http request",
+		"request_id", reqID,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"remote", r.RemoteAddr,
+		"user_agent", r.UserAgent(),
+	)
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -80,7 +91,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
+	reqID := r.Header.Get("X-Request-ID")
+
 	if r.Method == http.MethodGet {
+		slog.Info("login form displayed",
+			"request_id", reqID,
+			"client_id", r.URL.Query().Get("client_id"),
+			"redirect_uri", r.URL.Query().Get("redirect_uri"),
+		)
 		s.showLoginForm(w, r, "")
 		return
 	}
@@ -95,17 +113,28 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 
 		user, err := s.store.Authenticate(username, password)
 		if err != nil {
-			slog.Warn("authentication failed", "username", username, "error", err)
+			slog.Warn("login failed",
+				"request_id", reqID,
+				"username", username,
+				"remote", r.RemoteAddr,
+				"user_agent", r.UserAgent(),
+				"reason", err.Error(),
+			)
 			s.showLoginForm(w, r, "Invalid username or password")
 			return
 		}
 
-		slog.Info("user authenticated", "username", username)
+		slog.Info("login succeeded",
+			"request_id", reqID,
+			"username", username,
+			"user_id", user.ID,
+			"remote", r.RemoteAddr,
+			"user_agent", r.UserAgent(),
+		)
 
-		// Generate auth code
 		code, err := oidc.GenerateCode()
 		if err != nil {
-			slog.Error("failed to generate auth code", "error", err)
+			slog.Error("failed to generate auth code", "error", err, "request_id", reqID)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -128,7 +157,6 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		s.provider.StoreAuthCode(ac)
 
-		// Build redirect
 		state := r.FormValue("state")
 		sep := "?"
 		if strings.Contains(redirectURI, "?") {
@@ -149,14 +177,12 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg string) {
 	bp := s.cfg.NormalizedBasePath()
 
-	// Collect all query params as hidden fields to preserve through the POST
 	hidden := make(map[string]string)
 	for key, values := range r.URL.Query() {
 		hidden[key] = values[0]
 	}
-	// Also preserve form values on POST retry
 	if r.Method == http.MethodPost {
-		_ = r.ParseForm() // best-effort for preserving hidden fields
+		_ = r.ParseForm()
 		for key, values := range r.Form {
 			if key != "username" && key != "password" {
 				hidden[key] = values[0]

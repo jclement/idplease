@@ -34,32 +34,45 @@ var serverCmd = &cobra.Command{
 			return fmt.Errorf("load config: %w", err)
 		}
 
+		slog.Info("configuration loaded",
+			"config_file", cfgFile,
+			"port", cfg.Port,
+			"db_file", cfg.DBFile,
+			"key_file", cfg.KeyFile,
+		)
+
 		keys, err := cryptopkg.LoadOrGenerate(cfg.KeyFile)
 		if err != nil {
 			return fmt.Errorf("load keys: %w", err)
 		}
+		slog.Info("signing key loaded", "kid", keys.KeyID, "key_file", cfg.KeyFile)
 
 		s, err := store.New(cfg.DBFile)
 		if err != nil {
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer func() { _ = s.Close() }()
+		slog.Info("database opened", "db_file", cfg.DBFile)
 
 		// Load OIDC config from store (falls back to config file defaults)
 		cfg.LoadFromStore(s.GetConfig, s.GetConfigStringSlice, s.GetConfigMap)
 
 		provider := oidc.NewProvider(cfg, keys, s)
 
-		// Determine admin key
+		// Determine admin key and its source
 		adminKey := adminKeyFlag
+		adminKeySource := "flag"
 		if adminKey == "" {
 			adminKey = os.Getenv("IDPLEASE_ADMIN_KEY")
+			adminKeySource = "env"
 		}
 		if adminKey == "" {
 			adminKey = cfg.AdminKey
+			adminKeySource = "config"
 		}
 		if adminKey == "" {
 			adminKey = config.GenerateSecret()[:16]
+			adminKeySource = "generated"
 			slog.Info("generated admin key (use --admin-key to set a persistent one)", "key", adminKey)
 		}
 
@@ -68,9 +81,20 @@ var serverCmd = &cobra.Command{
 			return fmt.Errorf("create server: %w", err)
 		}
 
+		userCount, _ := s.UserCount()
+
 		addr := fmt.Sprintf(":%d", cfg.Port)
-		slog.Info("starting IDPlease server", "addr", addr, "issuer", cfg.Issuer, "basePath", cfg.NormalizedBasePath())
-		slog.Info("admin UI available", "url", cfg.Issuer+cfg.NormalizedBasePath()+"admin")
+		slog.Info("starting IDPlease server",
+			"addr", addr,
+			"issuer", cfg.Issuer,
+			"base_path", cfg.NormalizedBasePath(),
+			"client_ids", cfg.GetClientIDs(),
+			"access_token_lifetime", cfg.GetAccessTokenLifetime(),
+			"refresh_token_lifetime", cfg.GetRefreshTokenLifetime(),
+			"admin_key_source", adminKeySource,
+			"admin_url", cfg.Issuer+cfg.NormalizedBasePath()+"admin",
+			"user_count", userCount,
+		)
 		return http.ListenAndServe(addr, srv.Handler())
 	},
 }

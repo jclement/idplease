@@ -15,8 +15,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Port != 8080 {
 		t.Errorf("expected port 8080, got %d", cfg.Port)
 	}
-	if cfg.TokenLifetime != 3600 {
-		t.Errorf("expected 3600, got %d", cfg.TokenLifetime)
+	if cfg.GetAccessTokenLifetime() != 300 {
+		t.Errorf("expected 300, got %d", cfg.GetAccessTokenLifetime())
+	}
+	if cfg.GetRefreshTokenLifetime() != 86400 {
+		t.Errorf("expected 86400, got %d", cfg.GetRefreshTokenLifetime())
 	}
 	if cfg.SessionSecret == "" {
 		t.Error("session secret should be auto-generated")
@@ -29,11 +32,13 @@ func TestLoadDefaults(t *testing.T) {
 func TestLoadFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.json")
 	data := map[string]interface{}{
-		"issuer":   "https://example.com",
-		"port":     9090,
-		"basePath": "/idp",
-		"clientID": "my-client",
-		"tenantID": "tenant-123",
+		"issuer":               "https://example.com",
+		"port":                 9090,
+		"basePath":             "/idp",
+		"clientID":             "my-client",
+		"tenantID":             "tenant-123",
+		"accessTokenLifetime":  600,
+		"refreshTokenLifetime": 172800,
 	}
 	b, _ := json.Marshal(data)
 	if err := os.WriteFile(path, b, 0644); err != nil {
@@ -52,6 +57,24 @@ func TestLoadFromFile(t *testing.T) {
 	}
 	if cfg.TenantID != "tenant-123" {
 		t.Errorf("unexpected tenantID: %s", cfg.TenantID)
+	}
+	if cfg.GetAccessTokenLifetime() != 600 {
+		t.Errorf("expected 600, got %d", cfg.GetAccessTokenLifetime())
+	}
+	if cfg.GetRefreshTokenLifetime() != 172800 {
+		t.Errorf("expected 172800, got %d", cfg.GetRefreshTokenLifetime())
+	}
+}
+
+func TestLegacyTokenLifetimeFallback(t *testing.T) {
+	cfg := &Config{TokenLifetime: 3600}
+	if cfg.GetAccessTokenLifetime() != 3600 {
+		t.Errorf("expected legacy fallback 3600, got %d", cfg.GetAccessTokenLifetime())
+	}
+	// AccessTokenLifetime takes priority
+	cfg.AccessTokenLifetime = 600
+	if cfg.GetAccessTokenLifetime() != 600 {
+		t.Errorf("expected 600, got %d", cfg.GetAccessTokenLifetime())
 	}
 }
 
@@ -119,14 +142,15 @@ func TestNormalizedBasePath(t *testing.T) {
 
 func TestLoadFromStore(t *testing.T) {
 	cfg := &Config{
-		Issuer:        "http://default",
-		TokenLifetime: 3600,
+		Issuer:              "http://default",
+		AccessTokenLifetime: 300,
 	}
 
 	configData := map[string]string{
-		"issuer":         "https://store-issuer.com",
-		"token_lifetime": "7200",
-		"display_name":   "My IDP",
+		"issuer":                 "https://store-issuer.com",
+		"access_token_lifetime":  "600",
+		"refresh_token_lifetime": "172800",
+		"display_name":           "My IDP",
 	}
 	sliceData := map[string][]string{
 		"client_ids":    {"app1", "app2"},
@@ -160,8 +184,11 @@ func TestLoadFromStore(t *testing.T) {
 	if cfg.Issuer != "https://store-issuer.com" {
 		t.Errorf("expected store issuer, got %s", cfg.Issuer)
 	}
-	if cfg.TokenLifetime != 7200 {
-		t.Errorf("expected 7200, got %d", cfg.TokenLifetime)
+	if cfg.GetAccessTokenLifetime() != 600 {
+		t.Errorf("expected 600, got %d", cfg.GetAccessTokenLifetime())
+	}
+	if cfg.GetRefreshTokenLifetime() != 172800 {
+		t.Errorf("expected 172800, got %d", cfg.GetRefreshTokenLifetime())
 	}
 	if cfg.DisplayName != "My IDP" {
 		t.Errorf("expected My IDP, got %s", cfg.DisplayName)

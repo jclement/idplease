@@ -64,6 +64,7 @@ func (a *Admin) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("idplease_admin")
 		if err != nil || cookie.Value != a.adminKey {
+			slog.Info("admin auth redirect", "path", r.URL.Path, "remote", r.RemoteAddr)
 			bp := a.cfg.NormalizedBasePath()
 			http.Redirect(w, r, bp+"admin/login", http.StatusFound)
 			return
@@ -80,6 +81,7 @@ func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		key := r.FormValue("admin_key")
 		if key == a.adminKey {
+			slog.Info("admin login succeeded", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
 			http.SetCookie(w, &http.Cookie{
 				Name:     "idplease_admin",
 				Value:    a.adminKey,
@@ -91,6 +93,7 @@ func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, bp+"admin", http.StatusFound)
 			return
 		}
+		slog.Warn("admin login failed", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
 		a.renderTemplate(w, "admin_login.html", map[string]interface{}{
 			"Error":    "Invalid admin key",
 			"BasePath": a.cfg.NormalizedBasePath(),
@@ -103,6 +106,7 @@ func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Admin) logoutHandler(w http.ResponseWriter, r *http.Request) {
+	slog.Info("admin logout", "remote", r.RemoteAddr)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "idplease_admin",
 		Value:    "",
@@ -127,16 +131,17 @@ func (a *Admin) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	a.renderTemplate(w, "admin_settings.html", map[string]interface{}{
-		"BasePath":      a.cfg.NormalizedBasePath(),
-		"DisplayName":   a.cfg.DisplayName,
-		"Issuer":        a.cfg.Issuer,
-		"ClientIDs":     strings.Join(a.cfg.GetClientIDs(), "\n"),
-		"TenantID":      a.cfg.TenantID,
-		"TokenLifetime": a.cfg.TokenLifetime,
-		"RedirectURIs":  strings.Join(a.cfg.RedirectURIs, "\n"),
-		"GroupMappings": formatGroupMappings(a.cfg.GroupMapping),
-		"SessionSecret": a.cfg.SessionSecret,
-		"Flash":         getFlash(r),
+		"BasePath":             a.cfg.NormalizedBasePath(),
+		"DisplayName":          a.cfg.DisplayName,
+		"Issuer":               a.cfg.Issuer,
+		"ClientIDs":            strings.Join(a.cfg.GetClientIDs(), "\n"),
+		"TenantID":             a.cfg.TenantID,
+		"AccessTokenLifetime":  a.cfg.GetAccessTokenLifetime(),
+		"RefreshTokenLifetime": a.cfg.GetRefreshTokenLifetime(),
+		"RedirectURIs":         strings.Join(a.cfg.RedirectURIs, "\n"),
+		"GroupMappings":        formatGroupMappings(a.cfg.GroupMapping),
+		"SessionSecret":        a.cfg.SessionSecret,
+		"Flash":                getFlash(r),
 	})
 }
 
@@ -152,43 +157,50 @@ func (a *Admin) settingsSaveHandler(w http.ResponseWriter, r *http.Request) {
 
 	bp := a.cfg.NormalizedBasePath()
 
-	// Save each setting to the store
 	settings := map[string]string{
 		"display_name":   r.FormValue("display_name"),
 		"issuer":         r.FormValue("issuer"),
 		"tenant_id":      r.FormValue("tenant_id"),
 		"session_secret": r.FormValue("session_secret"),
 	}
-	if tl := r.FormValue("token_lifetime"); tl != "" {
+	if tl := r.FormValue("access_token_lifetime"); tl != "" {
 		if _, err := strconv.Atoi(tl); err == nil {
-			settings["token_lifetime"] = tl
+			settings["access_token_lifetime"] = tl
+		}
+	}
+	if tl := r.FormValue("refresh_token_lifetime"); tl != "" {
+		if _, err := strconv.Atoi(tl); err == nil {
+			settings["refresh_token_lifetime"] = tl
 		}
 	}
 
 	for k, v := range settings {
 		if err := a.store.SetConfig(k, v); err != nil {
-			slog.Error("failed to save config", "key", k, "error", err)
+			slog.Error("admin: failed to save config", "key", k, "error", err)
 		}
 	}
 
-	// Save array settings
 	clientIDs := splitLines(r.FormValue("client_ids"))
 	if err := a.store.SetConfigStringSlice("client_ids", clientIDs); err != nil {
-		slog.Error("failed to save client_ids", "error", err)
+		slog.Error("admin: failed to save client_ids", "error", err)
 	}
 	redirectURIs := splitLines(r.FormValue("redirect_uris"))
 	if err := a.store.SetConfigStringSlice("redirect_uris", redirectURIs); err != nil {
-		slog.Error("failed to save redirect_uris", "error", err)
+		slog.Error("admin: failed to save redirect_uris", "error", err)
 	}
 
-	// Save group mappings
 	gm := parseGroupMappings(r.FormValue("group_mappings"))
 	if err := a.store.SetConfigMap("group_mappings", gm); err != nil {
-		slog.Error("failed to save group_mappings", "error", err)
+		slog.Error("admin: failed to save group_mappings", "error", err)
 	}
 
-	// Reload config from store
 	a.cfg.LoadFromStore(a.store.GetConfig, a.store.GetConfigStringSlice, a.store.GetConfigMap)
+
+	slog.Info("admin: settings updated",
+		"remote", r.RemoteAddr,
+		"issuer", settings["issuer"],
+		"display_name", settings["display_name"],
+	)
 
 	http.Redirect(w, r, bp+"admin/settings?flash=Settings+saved+successfully&flash_type=success", http.StatusFound)
 }
@@ -228,19 +240,21 @@ func (a *Admin) userAddHandler(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 
 	if err := a.store.AddUser(username, password, email, displayName); err != nil {
+		slog.Warn("admin: user add failed", "username", username, "error", err, "remote", r.RemoteAddr)
 		a.renderTemplate(w, "admin_user_form.html", map[string]interface{}{
-			"BasePath": bp,
-			"Title":    "Add User",
-			"Action":   bp + "admin/users/add",
-			"IsNew":    true,
-			"Error":    err.Error(),
-			"Username": username,
-			"Email":    email,
+			"BasePath":    bp,
+			"Title":       "Add User",
+			"Action":      bp + "admin/users/add",
+			"IsNew":       true,
+			"Error":       err.Error(),
+			"Username":    username,
+			"Email":       email,
 			"DisplayName": displayName,
 		})
 		return
 	}
 
+	slog.Info("admin: user created", "username", username, "email", email, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/users?flash=User+%22"+username+"%22+added+successfully&flash_type=success", http.StatusFound)
 }
 
@@ -296,6 +310,7 @@ func (a *Admin) userEditHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info("admin: user updated", "username", username, "email", email, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/users?flash=User+%22"+username+"%22+updated&flash_type=success", http.StatusFound)
 }
 
@@ -315,6 +330,7 @@ func (a *Admin) userDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, bp+"admin/users?flash="+err.Error()+"&flash_type=error", http.StatusFound)
 		return
 	}
+	slog.Info("admin: user deleted", "username", username, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/users?flash=User+%22"+username+"%22+deleted&flash_type=success", http.StatusFound)
 }
 
@@ -335,6 +351,7 @@ func (a *Admin) userResetPasswordHandler(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, bp+"admin/users?flash="+err.Error()+"&flash_type=error", http.StatusFound)
 		return
 	}
+	slog.Info("admin: password reset", "username", username, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/users?flash=Password+reset+for+%22"+username+"%22&flash_type=success", http.StatusFound)
 }
 
@@ -376,6 +393,7 @@ func (a *Admin) roleAddHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, bp+"admin/users/roles?username="+username+"&flash="+err.Error()+"&flash_type=error", http.StatusFound)
 		return
 	}
+	slog.Info("admin: role added", "username", username, "role", role, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/users/roles?username="+username+"&flash=Role+%22"+role+"%22+added&flash_type=success", http.StatusFound)
 }
 
@@ -396,6 +414,7 @@ func (a *Admin) roleRemoveHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, bp+"admin/users/roles?username="+username+"&flash="+err.Error()+"&flash_type=error", http.StatusFound)
 		return
 	}
+	slog.Info("admin: role removed", "username", username, "role", role, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/users/roles?username="+username+"&flash=Role+%22"+role+"%22+removed&flash_type=success", http.StatusFound)
 }
 
@@ -456,7 +475,6 @@ func parseGroupMappings(s string) map[string]string {
 	return result
 }
 
-// RegisterRoutes registers admin routes on the given mux
 func (a *Admin) RegisterRoutes(mux *http.ServeMux) {
 	bp := a.cfg.NormalizedBasePath()
 	prefix := bp + "admin"
@@ -475,5 +493,3 @@ func (a *Admin) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(prefix+"/users/roles/add", a.requireAuth(a.roleAddHandler))
 	mux.HandleFunc(prefix+"/users/roles/remove", a.requireAuth(a.roleRemoveHandler))
 }
-
-// end of file

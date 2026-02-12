@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 )
 
 func tempStore(t *testing.T) *Store {
@@ -116,7 +117,6 @@ func TestRoles(t *testing.T) {
 		t.Fatalf("expected 2 roles, got %d", len(roles))
 	}
 
-	// Duplicate role
 	if err := s.AddRole("bob", "Admin"); err == nil {
 		t.Error("should error on duplicate role")
 	}
@@ -129,12 +129,10 @@ func TestRoles(t *testing.T) {
 		t.Fatalf("expected 1 role, got %d", len(roles))
 	}
 
-	// Remove non-existent role
 	if err := s.RemoveRole("bob", "Admin"); err == nil {
 		t.Error("should error on removing non-existent role")
 	}
 
-	// Roles for non-existent user
 	_, err := s.ListRoles("nobody")
 	if err == nil {
 		t.Error("should error for non-existent user")
@@ -142,7 +140,6 @@ func TestRoles(t *testing.T) {
 }
 
 func TestPersistence(t *testing.T) {
-	// Use a temp file for persistence test
 	path := t.TempDir() + "/test.db"
 	s, err := New(path)
 	if err != nil {
@@ -152,7 +149,6 @@ func TestPersistence(t *testing.T) {
 	_ = s.AddRole("bob", "Admin")
 	_ = s.Close()
 
-	// Reload
 	s2, err := New(path)
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +178,6 @@ func TestConfig(t *testing.T) {
 		t.Errorf("expected http://localhost:8080, got %s", val)
 	}
 
-	// Update
 	if err := s.SetConfig("issuer", "https://example.com"); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +189,6 @@ func TestConfig(t *testing.T) {
 		t.Errorf("expected https://example.com, got %s", val)
 	}
 
-	// Get all
 	_ = s.SetConfig("port", "9090")
 	all, err := s.GetAllConfig()
 	if err != nil {
@@ -241,5 +235,106 @@ func TestUpdateUser(t *testing.T) {
 	}
 	if u.DisplayName != "New Bob" {
 		t.Errorf("expected New Bob, got %s", u.DisplayName)
+	}
+}
+
+func TestRefreshTokenStoreAndConsume(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	u, _ := s.GetUser("bob")
+
+	raw, err := GenerateRefreshToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = s.StoreRefreshToken(raw, u.ID, "test-client", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Consume should succeed
+	userID, clientID, err := s.ConsumeRefreshToken(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userID != u.ID {
+		t.Errorf("expected user ID %s, got %s", u.ID, userID)
+	}
+	if clientID != "test-client" {
+		t.Errorf("expected client_id test-client, got %s", clientID)
+	}
+
+	// Consume again should fail (revoked via rotation)
+	_, _, err = s.ConsumeRefreshToken(raw)
+	if err == nil {
+		t.Error("should fail on already-consumed refresh token")
+	}
+}
+
+func TestRefreshTokenExpired(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	u, _ := s.GetUser("bob")
+
+	raw, _ := GenerateRefreshToken()
+	// Store with zero lifetime (already expired)
+	_, err := s.StoreRefreshToken(raw, u.ID, "test-client", -1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.ConsumeRefreshToken(raw)
+	if err == nil {
+		t.Error("should fail on expired refresh token")
+	}
+}
+
+func TestRefreshTokenInvalid(t *testing.T) {
+	s := tempStore(t)
+	_, _, err := s.ConsumeRefreshToken("nonexistent-token")
+	if err == nil {
+		t.Error("should fail on nonexistent refresh token")
+	}
+}
+
+func TestRevokeRefreshTokensForUser(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	u, _ := s.GetUser("bob")
+
+	raw1, _ := GenerateRefreshToken()
+	raw2, _ := GenerateRefreshToken()
+	_, _ = s.StoreRefreshToken(raw1, u.ID, "c1", 24*time.Hour)
+	_, _ = s.StoreRefreshToken(raw2, u.ID, "c2", 24*time.Hour)
+
+	if err := s.RevokeRefreshTokensForUser(u.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := s.ConsumeRefreshToken(raw1)
+	if err == nil {
+		t.Error("should fail after revoke")
+	}
+	_, _, err = s.ConsumeRefreshToken(raw2)
+	if err == nil {
+		t.Error("should fail after revoke")
+	}
+}
+
+func TestCleanupExpiredRefreshTokens(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	u, _ := s.GetUser("bob")
+
+	raw, _ := GenerateRefreshToken()
+	_, _ = s.StoreRefreshToken(raw, u.ID, "c1", -1*time.Hour)
+
+	count, err := s.CleanupExpiredRefreshTokens(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 cleaned up, got %d", count)
 	}
 }

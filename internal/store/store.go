@@ -1,15 +1,18 @@
 package store
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	_ "modernc.org/sqlite"
 	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
 )
 
 type User struct {
@@ -19,6 +22,16 @@ type User struct {
 	DisplayName  string   `json:"displayName"`
 	PasswordHash string   `json:"passwordHash"`
 	Roles        []string `json:"roles"`
+}
+
+type RefreshToken struct {
+	ID        string
+	TokenHash string
+	UserID    string
+	ClientID  string
+	IssuedAt  time.Time
+	ExpiresAt time.Time
+	Revoked   bool
 }
 
 type Store struct {
@@ -31,9 +44,12 @@ func New(dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	// Enable WAL mode for better concurrency
+	// Enable WAL mode and foreign keys
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		return nil, fmt.Errorf("set WAL mode: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -71,6 +87,16 @@ func (s *Store) migrate() error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS refresh_tokens (
+			id TEXT PRIMARY KEY,
+			token_hash TEXT UNIQUE NOT NULL,
+			user_id TEXT NOT NULL,
+			client_id TEXT NOT NULL DEFAULT '',
+			issued_at DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
+			revoked INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		)`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -79,6 +105,8 @@ func (s *Store) migrate() error {
 	}
 	return nil
 }
+
+// --- User methods ---
 
 func (s *Store) AddUser(username, password, email, displayName string) error {
 	s.mu.Lock()
@@ -95,7 +123,6 @@ func (s *Store) AddUser(username, password, email, displayName string) error {
 		id, username, email, displayName, string(hash),
 	)
 	if err != nil {
-		// Check for unique constraint violation
 		return fmt.Errorf("user %q already exists", username)
 	}
 	return nil
@@ -337,7 +364,107 @@ func (s *Store) ListRoles(username string) ([]string, error) {
 	return s.getUserRoles(userID)
 }
 
-// Config methods
+// UserCount returns the number of users
+func (s *Store) UserCount() (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	return count, err
+}
+
+// --- Refresh Token methods ---
+
+// hashToken produces a SHA-256 hex hash of a raw token string
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+// GenerateRefreshToken creates a cryptographically random refresh token string
+func GenerateRefreshToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// StoreRefreshToken stores a refresh token (hashed) in the database
+func (s *Store) StoreRefreshToken(rawToken, userID, clientID string, lifetime time.Duration) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id := uuid.New().String()
+	now := time.Now()
+	_, err := s.db.Exec(
+		"INSERT INTO refresh_tokens (id, token_hash, user_id, client_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+		id, hashToken(rawToken), userID, clientID, now, now.Add(lifetime),
+	)
+	if err != nil {
+		return "", fmt.Errorf("store refresh token: %w", err)
+	}
+	return id, nil
+}
+
+// ConsumeRefreshToken validates and revokes a refresh token, returning the associated user/client info.
+// Returns (userID, clientID, error). Implements rotation: old token is revoked.
+func (s *Store) ConsumeRefreshToken(rawToken string) (string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h := hashToken(rawToken)
+	var id, userID, clientID string
+	var expiresAt time.Time
+	var revoked int
+
+	err := s.db.QueryRow(
+		"SELECT id, user_id, client_id, expires_at, revoked FROM refresh_tokens WHERE token_hash = ?", h,
+	).Scan(&id, &userID, &clientID, &expiresAt, &revoked)
+	if err != nil {
+		return "", "", fmt.Errorf("refresh token not found")
+	}
+
+	if revoked != 0 {
+		return "", "", fmt.Errorf("refresh token has been revoked")
+	}
+	if time.Now().After(expiresAt) {
+		return "", "", fmt.Errorf("refresh token has expired")
+	}
+
+	// Revoke this token (rotation)
+	_, err = s.db.Exec("UPDATE refresh_tokens SET revoked = 1 WHERE id = ?", id)
+	if err != nil {
+		return "", "", fmt.Errorf("revoke refresh token: %w", err)
+	}
+
+	return userID, clientID, nil
+}
+
+// RevokeRefreshTokensForUser revokes all refresh tokens for a user
+func (s *Store) RevokeRefreshTokensForUser(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?", userID)
+	return err
+}
+
+// CleanupExpiredRefreshTokens removes expired/revoked tokens older than the given duration
+func (s *Store) CleanupExpiredRefreshTokens(olderThan time.Duration) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().Add(-olderThan)
+	result, err := s.db.Exec(
+		"DELETE FROM refresh_tokens WHERE (revoked = 1 OR expires_at < ?) AND issued_at < ?",
+		time.Now(), cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// --- Config methods ---
 
 func (s *Store) GetConfig(key string) (string, error) {
 	var value string
@@ -379,7 +506,6 @@ func (s *Store) DeleteConfig(key string) error {
 	return err
 }
 
-// GetConfigStringSlice retrieves a JSON-encoded string slice from config
 func (s *Store) GetConfigStringSlice(key string) ([]string, error) {
 	val, err := s.GetConfig(key)
 	if err != nil {
@@ -392,7 +518,6 @@ func (s *Store) GetConfigStringSlice(key string) ([]string, error) {
 	return result, nil
 }
 
-// SetConfigStringSlice stores a string slice as JSON in config
 func (s *Store) SetConfigStringSlice(key string, values []string) error {
 	data, err := json.Marshal(values)
 	if err != nil {
@@ -401,7 +526,6 @@ func (s *Store) SetConfigStringSlice(key string, values []string) error {
 	return s.SetConfig(key, string(data))
 }
 
-// GetConfigMap retrieves a JSON-encoded map from config
 func (s *Store) GetConfigMap(key string) (map[string]string, error) {
 	val, err := s.GetConfig(key)
 	if err != nil {
@@ -414,18 +538,10 @@ func (s *Store) GetConfigMap(key string) (map[string]string, error) {
 	return result, nil
 }
 
-// SetConfigMap stores a map as JSON in config
 func (s *Store) SetConfigMap(key string, m map[string]string) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
 	return s.SetConfig(key, string(data))
-}
-
-// UserCount returns the number of users
-func (s *Store) UserCount() (int, error) {
-	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
-	return count, err
 }
