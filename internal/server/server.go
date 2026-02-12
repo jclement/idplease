@@ -71,7 +71,10 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
-		r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "failed to parse form", http.StatusBadRequest)
+			return
+		}
 		username := r.FormValue("username")
 		password := r.FormValue("password")
 
@@ -138,7 +141,7 @@ func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg st
 	}
 	// Also preserve form values on POST retry
 	if r.Method == http.MethodPost {
-		r.ParseForm()
+		_ = r.ParseForm() // best-effort for preserving hidden fields
 		for key, values := range r.Form {
 			if key != "username" && key != "password" {
 				hidden[key] = values[0]

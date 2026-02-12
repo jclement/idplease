@@ -48,7 +48,7 @@ func TestDiscovery(t *testing.T) {
 	}
 
 	var doc map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&doc)
+	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil { t.Fatal(err) }
 
 	if doc["issuer"] != "http://localhost:8080" {
 		t.Errorf("unexpected issuer: %v", doc["issuer"])
@@ -80,7 +80,7 @@ func TestJWKS(t *testing.T) {
 	}
 
 	var jwks map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&jwks)
+	if err := json.NewDecoder(w.Body).Decode(&jwks); err != nil { t.Fatal(err) }
 
 	keys := jwks["keys"].([]interface{})
 	if len(keys) != 1 {
@@ -248,7 +248,7 @@ func TestTokenEndpointPKCE(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil { t.Fatal(err) }
 	if resp["access_token"] == nil {
 		t.Error("missing access_token")
 	}

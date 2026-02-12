@@ -116,7 +116,9 @@ func (p *Provider) DiscoveryHandler() http.HandlerFunc {
 			"code_challenge_methods_supported":      []string{"S256"},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(doc)
+		if err := json.NewEncoder(w).Encode(doc); err != nil {
+			slog.Error("failed to encode discovery document", "error", err)
+		}
 	}
 }
 
@@ -136,7 +138,9 @@ func (p *Provider) JWKSHandler() http.HandlerFunc {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(jwks)
+		if err := json.NewEncoder(w).Encode(jwks); err != nil {
+			slog.Error("failed to encode JWKS", "error", err)
+		}
 	}
 }
 
@@ -146,7 +150,10 @@ func (p *Provider) TokenHandler() http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			jsonError(w, "invalid_request", "failed to parse form", http.StatusBadRequest)
+			return
+		}
 
 		grantType := r.FormValue("grant_type")
 		if grantType != "authorization_code" {
@@ -244,7 +251,9 @@ func (p *Provider) TokenHandler() http.HandlerFunc {
 			"id_token":     signed,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			slog.Error("failed to encode token response", "error", err)
+		}
 	}
 }
 
