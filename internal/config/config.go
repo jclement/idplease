@@ -120,6 +120,8 @@ func Load(path string) (*Config, error) {
 
 func generateSecret() string {
 	b := make([]byte, 32)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("failed to generate random secret: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

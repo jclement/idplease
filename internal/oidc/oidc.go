@@ -295,7 +295,7 @@ func verifyPKCE(challenge, method, verifier string) bool {
 func jsonError(w http.ResponseWriter, errCode, desc string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":             errCode,
 		"error_description": desc,
 	})

@@ -39,7 +39,7 @@ func TestAddAndListUsers(t *testing.T) {
 
 func TestDuplicateUser(t *testing.T) {
 	s := tempStore(t)
-	s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	err := s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	if err == nil {
 		t.Error("should error on duplicate user")
@@ -48,7 +48,7 @@ func TestDuplicateUser(t *testing.T) {
 
 func TestAuthenticate(t *testing.T) {
 	s := tempStore(t)
-	s.AddUser("bob", "secret", "bob@test.com", "Bob")
+	_ = s.AddUser("bob", "secret", "bob@test.com", "Bob")
 
 	user, err := s.Authenticate("bob", "secret")
 	if err != nil {
@@ -71,7 +71,7 @@ func TestAuthenticate(t *testing.T) {
 
 func TestDeleteUser(t *testing.T) {
 	s := tempStore(t)
-	s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 
 	if err := s.DeleteUser("bob"); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestDeleteUser(t *testing.T) {
 
 func TestResetPassword(t *testing.T) {
 	s := tempStore(t)
-	s.AddUser("bob", "oldpass", "bob@test.com", "Bob")
+	_ = s.AddUser("bob", "oldpass", "bob@test.com", "Bob")
 
 	if err := s.ResetPassword("bob", "newpass"); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestResetPassword(t *testing.T) {
 
 func TestRoles(t *testing.T) {
 	s := tempStore(t)
-	s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 
 	if err := s.AddRole("bob", "Admin"); err != nil {
 		t.Fatal(err)
@@ -146,8 +146,8 @@ func TestRoles(t *testing.T) {
 func TestPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "users.json")
 	s, _ := New(path)
-	s.AddUser("bob", "pass", "bob@test.com", "Bob")
-	s.AddRole("bob", "Admin")
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	_ = s.AddRole("bob", "Admin")
 
 	// Reload
 	s2, err := New(path)

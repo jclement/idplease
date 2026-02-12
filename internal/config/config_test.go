@@ -36,7 +36,9 @@ func TestLoadFromFile(t *testing.T) {
 		"tenantID": "tenant-123",
 	}
 	b, _ := json.Marshal(data)
-	os.WriteFile(path, b, 0644)
+	if err := os.WriteFile(path, b, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := Load(path)
 	if err != nil {
