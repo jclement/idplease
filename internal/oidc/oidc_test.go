@@ -36,7 +36,9 @@ func testProvider(t *testing.T) *Provider {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return &Provider{cfg: cfg, keys: km, store: s, codes: make(map[string]*AuthCode)}
+	p := &Provider{cfg: cfg, keys: km, store: s, codes: make(map[string]*AuthCode), stop: make(chan struct{})}
+	t.Cleanup(func() { close(p.stop) })
+	return p
 }
 
 func TestDiscovery(t *testing.T) {

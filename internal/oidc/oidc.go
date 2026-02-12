@@ -36,17 +36,28 @@ type Provider struct {
 	store *store.Store
 	mu    sync.RWMutex
 	codes map[string]*AuthCode
+	stop  chan struct{}
 }
 
 func NewProvider(cfg *config.Config, keys *cryptopkg.KeyManager, s *store.Store) *Provider {
-	p := &Provider{cfg: cfg, keys: keys, store: s, codes: make(map[string]*AuthCode)}
+	p := &Provider{cfg: cfg, keys: keys, store: s, codes: make(map[string]*AuthCode), stop: make(chan struct{})}
 	go p.cleanupLoop()
 	return p
 }
 
+func (p *Provider) Close() {
+	close(p.stop)
+}
+
 func (p *Provider) cleanupLoop() {
 	ticker := time.NewTicker(30 * time.Second)
-	for range ticker.C {
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-ticker.C:
+		}
 		p.mu.Lock()
 		now := time.Now()
 		for code, ac := range p.codes {
