@@ -321,6 +321,7 @@ func TestRevokeEndpoint(t *testing.T) {
 
 func TestEndSessionEndpoint(t *testing.T) {
 	p := testProvider(t)
+	// H2: With wildcard redirect URIs in config, should allow redirect
 	req := httptest.NewRequest("GET", "/end-session?post_logout_redirect_uri=http://example.com", nil)
 	w := httptest.NewRecorder()
 	p.EndSessionHandler()(w, req)
@@ -329,6 +330,25 @@ func TestEndSessionEndpoint(t *testing.T) {
 	}
 	if w.Header().Get("Location") != "http://example.com" {
 		t.Errorf("unexpected redirect: %s", w.Header().Get("Location"))
+	}
+}
+
+func TestEndSessionInvalidRedirect(t *testing.T) {
+	p := testProvider(t)
+	// H2: With specific redirect URIs, should reject unknown URI
+	p.cfg.RedirectURIs = []string{"http://allowed.com/cb"}
+	req := httptest.NewRequest("GET", "/end-session?post_logout_redirect_uri=http://evil.com", nil)
+	w := httptest.NewRecorder()
+	p.EndSessionHandler()(w, req)
+	if w.Code != http.StatusFound {
+		t.Errorf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc == "http://evil.com" {
+		t.Error("H2: should NOT redirect to unvalidated URI")
+	}
+	if !strings.Contains(loc, "authorize") {
+		t.Errorf("should redirect to login page, got: %s", loc)
 	}
 }
 

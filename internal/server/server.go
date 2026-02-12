@@ -1,13 +1,18 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jclement/idplease/internal/admin"
@@ -117,15 +122,66 @@ func (s *Server) Handler() http.Handler { return s }
 
 func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	reqID := r.Header.Get("X-Request-ID")
-	if r.Method == http.MethodGet {
-		s.showLoginForm(w, r, "")
-		return
-	}
+
+	// H5: Validate client_id exists
+	clientID := r.URL.Query().Get("client_id")
 	if r.Method == http.MethodPost {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "failed to parse form", http.StatusBadRequest)
 			return
 		}
+		clientID = r.FormValue("client_id")
+	}
+	if clientID == "" {
+		s.showError(w, "Missing client_id parameter", http.StatusBadRequest)
+		return
+	}
+	// Check client registry first, then fall back to config
+	client, clientErr := s.store.GetClient(clientID)
+	if clientErr != nil && !s.cfg.IsValidClientID(clientID) {
+		slog.Warn("authorize: invalid client_id", "client_id", clientID, "request_id", reqID)
+		s.showError(w, "Unknown client_id", http.StatusBadRequest)
+		return
+	}
+
+	// C2: Validate redirect_uri
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if r.Method == http.MethodPost {
+		redirectURI = r.FormValue("redirect_uri")
+	}
+	if redirectURI == "" {
+		s.showError(w, "Missing redirect_uri parameter", http.StatusBadRequest)
+		return
+	}
+	// Validate against client's registered redirect URIs (if client in registry)
+	redirectValid := false
+	if client != nil {
+		redirectValid = client.IsValidRedirectURI(redirectURI)
+	} else {
+		// Fall back to global config
+		redirectValid = s.cfg.IsValidRedirectURI(redirectURI)
+	}
+	if !redirectValid {
+		slog.Warn("authorize: invalid redirect_uri", "redirect_uri", redirectURI, "client_id", clientID, "request_id", reqID)
+		s.showError(w, "Invalid redirect_uri for this client", http.StatusBadRequest)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		s.showLoginForm(w, r, "")
+		return
+	}
+	if r.Method == http.MethodPost {
+		// ParseForm already called above for client_id/redirect_uri extraction
+
+		// CSRF validation for login form
+		csrfToken := r.FormValue("csrf_token")
+		if !s.validateLoginCSRF(csrfToken) {
+			slog.Warn("login CSRF token invalid", "remote", r.RemoteAddr, "request_id", reqID)
+			s.showLoginForm(w, r, "Invalid or expired form. Please try again.")
+			return
+		}
+
 		username := r.FormValue("username")
 		password := r.FormValue("password")
 
@@ -190,6 +246,47 @@ func (s *Server) checkRateLimit(username, remoteAddr string) (bool, string) {
 	return false, ""
 }
 
+// generateLoginCSRF creates an HMAC-based CSRF token for the login form.
+// Format: nonce:hmac(nonce+timestamp, sessionSecret)
+func (s *Server) generateLoginCSRF() string {
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	nonceHex := hex.EncodeToString(nonce)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	payload := nonceHex + ":" + ts
+	mac := hmac.New(sha256.New, []byte(s.cfg.SessionSecret))
+	_, _ = mac.Write([]byte(payload))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return payload + ":" + sig
+}
+
+func (s *Server) validateLoginCSRF(token string) bool {
+	parts := strings.SplitN(token, ":", 3)
+	if len(parts) != 3 {
+		return false
+	}
+	payload := parts[0] + ":" + parts[1]
+	mac := hmac.New(sha256.New, []byte(s.cfg.SessionSecret))
+	_, _ = mac.Write([]byte(payload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(parts[2]), []byte(expected)) {
+		return false
+	}
+	// Check timestamp (allow 1 hour)
+	ts := 0
+	_, _ = fmt.Sscanf(parts[1], "%d", &ts)
+	if time.Since(time.Unix(int64(ts), 0)) > 1*time.Hour {
+		return false
+	}
+	return true
+}
+
+func (s *Server) showError(w http.ResponseWriter, msg string, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_ = s.tmpl.ExecuteTemplate(w, "error.html", map[string]interface{}{"Error": msg})
+}
+
 func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg string) {
 	bp := s.cfg.NormalizedBasePath()
 	hidden := make(map[string]string)
@@ -204,7 +301,7 @@ func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg st
 			}
 		}
 	}
-	data := map[string]interface{}{"Error": errMsg, "Action": bp + "authorize", "HiddenFields": hidden}
+	data := map[string]interface{}{"Error": errMsg, "Action": bp + "authorize", "HiddenFields": hidden, "CSRFToken": s.generateLoginCSRF()}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "login.html", data); err != nil {
 		slog.Error("template error", "error", err)

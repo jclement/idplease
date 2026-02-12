@@ -1,6 +1,7 @@
 <!DOCTYPE html><html><body>
-{{if .Error}}<div>{{.Error}}</div>{{end}}
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
 <form method="POST" action="{{.Action}}">
+{{if .CSRFToken}}<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">{{end}}
 {{range $k, $v := .HiddenFields}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
 <input name="username"><input name="password"><button>Sign In</button>
 </form></body></html>

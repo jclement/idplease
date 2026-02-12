@@ -22,8 +22,12 @@ func ParseTemplates(templates embed.FS) (*template.Template, error) {
 
 	tmpl := template.New("").Funcs(funcMap)
 
-	// Parse login template
+	// Parse login and error templates
 	tmpl, err := tmpl.ParseFS(templates, "templates/login.html")
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err = tmpl.ParseFS(templates, "templates/error.html")
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +57,7 @@ func ParseTestTemplates(templates embed.FS) (*template.Template, error) {
 	}
 
 	tmpl := template.New("").Funcs(funcMap)
-	// Try testdata/*.html first
+	// Try testdata/*.html first (may contain login.html, error.html, etc.)
 	tmpl, err := tmpl.ParseFS(templates, "testdata/*.html")
 	if err != nil {
 		// Try testdata/templates/admin/*.html (server tests)

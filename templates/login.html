@@ -21,6 +21,7 @@
             {{end}}
 
             <form method="POST" action="{{.Action}}" class="space-y-5">
+                {{if .CSRFToken}}<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">{{end}}
                 {{range $k, $v := .HiddenFields}}
                 <input type="hidden" name="{{$k}}" value="{{$v}}">
                 {{end}}

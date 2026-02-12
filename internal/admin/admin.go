@@ -1,11 +1,17 @@
 package admin
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jclement/idplease/internal/config"
 	"github.com/jclement/idplease/internal/store"
@@ -17,6 +23,7 @@ type Admin struct {
 	tmpl     *template.Template
 	adminKey string
 	mux      *http.ServeMux
+	sessions *sessionStore
 }
 
 type flashData struct {
@@ -31,9 +38,14 @@ func New(cfg *config.Config, s *store.Store, tmpl *template.Template, adminKey s
 		tmpl:     tmpl,
 		adminKey: adminKey,
 		mux:      http.NewServeMux(),
+		sessions: newSessionStore(),
 	}
 	a.setupRoutes()
 	return a
+}
+
+func (a *Admin) Close() {
+	a.sessions.Close()
 }
 
 func (a *Admin) setupRoutes() {
@@ -63,17 +75,74 @@ func (a *Admin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.mux.ServeHTTP(w, r)
 }
 
+func (a *Admin) getSession(r *http.Request) *adminSession {
+	cookie, err := r.Cookie("idplease_admin")
+	if err != nil {
+		return nil
+	}
+	s, ok := a.sessions.get(cookie.Value)
+	if !ok {
+		return nil
+	}
+	return s
+}
+
 func (a *Admin) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("idplease_admin")
-		if err != nil || cookie.Value != a.adminKey {
+		s := a.getSession(r)
+		if s == nil {
 			slog.Info("admin auth redirect", "path", r.URL.Path, "remote", r.RemoteAddr)
 			bp := a.cfg.NormalizedBasePath()
 			http.Redirect(w, r, bp+"admin/login", http.StatusFound)
 			return
 		}
+		// CSRF validation for POST requests
+		if r.Method == http.MethodPost {
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			csrfToken := r.FormValue("csrf_token")
+			if !constantTimeEqual(csrfToken, s.csrfToken) {
+				slog.Warn("CSRF token mismatch", "path", r.URL.Path, "remote", r.RemoteAddr)
+				http.Error(w, "invalid CSRF token", http.StatusForbidden)
+				return
+			}
+		}
 		next(w, r)
 	}
+}
+
+func (a *Admin) generateLoginCSRF() string {
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	nonceHex := hex.EncodeToString(nonce)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	payload := nonceHex + ":" + ts
+	mac := hmac.New(sha256.New, []byte(a.adminKey))
+	_, _ = mac.Write([]byte(payload))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return payload + ":" + sig
+}
+
+func (a *Admin) validateLoginCSRF(token string) bool {
+	parts := strings.SplitN(token, ":", 3)
+	if len(parts) != 3 {
+		return false
+	}
+	payload := parts[0] + ":" + parts[1]
+	mac := hmac.New(sha256.New, []byte(a.adminKey))
+	_, _ = mac.Write([]byte(payload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(parts[2]), []byte(expected)) {
+		return false
+	}
+	ts := 0
+	_, _ = fmt.Sscanf(parts[1], "%d", &ts)
+	if time.Since(time.Unix(int64(ts), 0)) > 1*time.Hour {
+		return false
+	}
+	return true
 }
 
 func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -82,43 +151,81 @@ func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		key := r.FormValue("admin_key")
-		if key == a.adminKey {
-			slog.Info("admin login succeeded", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
-			http.SetCookie(w, &http.Cookie{
-				Name:     "idplease_admin",
-				Value:    a.adminKey,
-				Path:     "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
+
+		// CSRF validation for admin login
+		if !a.validateLoginCSRF(r.FormValue("csrf_token")) {
+			slog.Warn("admin login CSRF token invalid", "remote", r.RemoteAddr)
+			a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+				"Error":     "Invalid or expired form. Please try again.",
+				"BasePath":  a.cfg.NormalizedBasePath(),
+				"CSRFToken": a.generateLoginCSRF(),
 			})
+			return
+		}
+
+		// Rate limiting for admin login
+		rateLimitKey := "admin_ip:" + r.RemoteAddr
+		if count, err := a.store.CountAttempts(rateLimitKey, 1*60e9); err == nil && count >= 5 {
+			slog.Warn("admin login rate limited", "remote", r.RemoteAddr)
+			a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+				"Error":    "Too many login attempts. Please try again later.",
+				"BasePath": a.cfg.NormalizedBasePath(),
+			})
+			return
+		}
+
+		// Record attempt before checking
+		_ = a.store.RecordAttempt(rateLimitKey)
+
+		key := r.FormValue("admin_key")
+		if constantTimeEqual(key, a.adminKey) {
+			slog.Info("admin login succeeded", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
+
+			sess, err := a.sessions.create()
+			if err != nil {
+				slog.Error("failed to create admin session", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+
+			secure := isSecureIssuer(a.cfg.Issuer)
+			http.SetCookie(w, adminCookie("idplease_admin", sess.token, "/", 0, secure))
+
 			bp := a.cfg.NormalizedBasePath()
 			http.Redirect(w, r, bp+"admin", http.StatusFound)
 			return
 		}
 		slog.Warn("admin login failed", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
 		a.renderTemplate(w, "admin_login.html", map[string]interface{}{
-			"Error":    "Invalid admin key",
-			"BasePath": a.cfg.NormalizedBasePath(),
+			"Error":     "Invalid admin key",
+			"BasePath":  a.cfg.NormalizedBasePath(),
+			"CSRFToken": a.generateLoginCSRF(),
 		})
 		return
 	}
 	a.renderTemplate(w, "admin_login.html", map[string]interface{}{
-		"BasePath": a.cfg.NormalizedBasePath(),
+		"BasePath":  a.cfg.NormalizedBasePath(),
+		"CSRFToken": a.generateLoginCSRF(),
 	})
 }
 
 func (a *Admin) logoutHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Info("admin logout", "remote", r.RemoteAddr)
-	http.SetCookie(w, &http.Cookie{
-		Name:     "idplease_admin",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-	})
+	if cookie, err := r.Cookie("idplease_admin"); err == nil {
+		a.sessions.remove(cookie.Value)
+	}
+	secure := isSecureIssuer(a.cfg.Issuer)
+	http.SetCookie(w, adminCookie("idplease_admin", "", "/", -1, secure))
 	bp := a.cfg.NormalizedBasePath()
 	http.Redirect(w, r, bp+"admin/login", http.StatusFound)
+}
+
+func (a *Admin) csrfToken(r *http.Request) string {
+	s := a.getSession(r)
+	if s == nil {
+		return ""
+	}
+	return s.csrfToken
 }
 
 func (a *Admin) dashboardHandler(w http.ResponseWriter, r *http.Request) {
@@ -128,9 +235,10 @@ func (a *Admin) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 		"BasePath":    a.cfg.NormalizedBasePath(),
 		"UserCount":   userCount,
 		"ClientCount": clientCount,
-		"Issuer":    a.cfg.Issuer,
-		"ClientIDs": a.cfg.GetClientIDs(),
-		"Flash":     getFlash(r),
+		"Issuer":      a.cfg.Issuer,
+		"ClientIDs":   a.cfg.GetClientIDs(),
+		"Flash":       getFlash(r),
+		"CSRFToken":   a.csrfToken(r),
 	})
 }
 
@@ -147,6 +255,7 @@ func (a *Admin) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"GroupMappings":        formatGroupMappings(a.cfg.GroupMapping),
 		"SessionSecret":        a.cfg.SessionSecret,
 		"Flash":                getFlash(r),
+		"CSRFToken":            a.csrfToken(r),
 	})
 }
 
@@ -155,10 +264,7 @@ func (a *Admin) settingsSaveHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 
 	bp := a.cfg.NormalizedBasePath()
 
@@ -213,9 +319,10 @@ func (a *Admin) settingsSaveHandler(w http.ResponseWriter, r *http.Request) {
 func (a *Admin) usersHandler(w http.ResponseWriter, r *http.Request) {
 	users := a.store.ListUsers()
 	a.renderTemplate(w, "admin_users.html", map[string]interface{}{
-		"BasePath": a.cfg.NormalizedBasePath(),
-		"Users":    users,
-		"Flash":    getFlash(r),
+		"BasePath":  a.cfg.NormalizedBasePath(),
+		"Users":     users,
+		"Flash":     getFlash(r),
+		"CSRFToken": a.csrfToken(r),
 	})
 }
 
@@ -223,10 +330,11 @@ func (a *Admin) userAddHandler(w http.ResponseWriter, r *http.Request) {
 	bp := a.cfg.NormalizedBasePath()
 	if r.Method == http.MethodGet {
 		a.renderTemplate(w, "admin_user_form.html", map[string]interface{}{
-			"BasePath": bp,
-			"Title":    "Add User",
-			"Action":   bp + "admin/users/add",
-			"IsNew":    true,
+			"BasePath":  bp,
+			"Title":     "Add User",
+			"Action":    bp + "admin/users/add",
+			"IsNew":     true,
+			"CSRFToken": a.csrfToken(r),
 		})
 		return
 	}
@@ -234,10 +342,7 @@ func (a *Admin) userAddHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 
 	username := r.FormValue("username")
 	email := r.FormValue("email")
@@ -255,6 +360,7 @@ func (a *Admin) userAddHandler(w http.ResponseWriter, r *http.Request) {
 			"Username":    username,
 			"Email":       email,
 			"DisplayName": displayName,
+			"CSRFToken":   a.csrfToken(r),
 		})
 		return
 	}
@@ -285,6 +391,7 @@ func (a *Admin) userEditHandler(w http.ResponseWriter, r *http.Request) {
 			"Username":    user.Username,
 			"Email":       user.Email,
 			"DisplayName": user.DisplayName,
+			"CSRFToken":   a.csrfToken(r),
 		})
 		return
 	}
@@ -293,10 +400,7 @@ func (a *Admin) userEditHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 
 	email := r.FormValue("email")
 	displayName := r.FormValue("display_name")
@@ -311,6 +415,7 @@ func (a *Admin) userEditHandler(w http.ResponseWriter, r *http.Request) {
 			"Username":    username,
 			"Email":       email,
 			"DisplayName": displayName,
+			"CSRFToken":   a.csrfToken(r),
 		})
 		return
 	}
@@ -324,10 +429,7 @@ func (a *Admin) userDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 	bp := a.cfg.NormalizedBasePath()
 	username := r.FormValue("username")
 
@@ -344,10 +446,7 @@ func (a *Admin) userResetPasswordHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 	bp := a.cfg.NormalizedBasePath()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
@@ -375,9 +474,10 @@ func (a *Admin) userRolesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.renderTemplate(w, "admin_roles.html", map[string]interface{}{
-		"BasePath": bp,
-		"User":     user,
-		"Flash":    getFlash(r),
+		"BasePath":  bp,
+		"User":      user,
+		"Flash":     getFlash(r),
+		"CSRFToken": a.csrfToken(r),
 	})
 }
 
@@ -386,10 +486,7 @@ func (a *Admin) roleAddHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 	bp := a.cfg.NormalizedBasePath()
 	username := r.FormValue("username")
 	role := r.FormValue("role")
@@ -407,10 +504,7 @@ func (a *Admin) roleRemoveHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 	bp := a.cfg.NormalizedBasePath()
 	username := r.FormValue("username")
 	role := r.FormValue("role")
@@ -505,9 +599,10 @@ func (a *Admin) RegisterRoutes(mux *http.ServeMux) {
 func (a *Admin) clientsHandler(w http.ResponseWriter, r *http.Request) {
 	clients := a.store.ListClients()
 	a.renderTemplate(w, "admin_clients.html", map[string]interface{}{
-		"BasePath": a.cfg.NormalizedBasePath(),
-		"Clients":  clients,
-		"Flash":    getFlash(r),
+		"BasePath":  a.cfg.NormalizedBasePath(),
+		"Clients":   clients,
+		"Flash":     getFlash(r),
+		"CSRFToken": a.csrfToken(r),
 	})
 }
 
@@ -515,7 +610,8 @@ func (a *Admin) clientAddHandler(w http.ResponseWriter, r *http.Request) {
 	bp := a.cfg.NormalizedBasePath()
 	if r.Method == http.MethodGet {
 		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
-			"BasePath": bp,
+			"BasePath":  bp,
+			"CSRFToken": a.csrfToken(r),
 		})
 		return
 	}
@@ -523,10 +619,7 @@ func (a *Admin) clientAddHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 	clientID := r.FormValue("client_id")
 	clientName := r.FormValue("client_name")
 	confidential := r.FormValue("confidential") == "on"
@@ -540,6 +633,7 @@ func (a *Admin) clientAddHandler(w http.ResponseWriter, r *http.Request) {
 		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
 			"BasePath": bp, "Error": err.Error(),
 			"ClientID": clientID, "ClientName": clientName,
+			"CSRFToken": a.csrfToken(r),
 		})
 		return
 	}
@@ -552,10 +646,7 @@ func (a *Admin) clientDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// ParseForm already called by requireAuth CSRF check
 	bp := a.cfg.NormalizedBasePath()
 	clientID := r.FormValue("client_id")
 	if err := a.store.DeleteClient(clientID); err != nil {

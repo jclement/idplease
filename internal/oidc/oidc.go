@@ -366,12 +366,34 @@ func (p *Provider) EndSessionHandler() http.HandlerFunc {
 		redirectURI := r.URL.Query().Get("post_logout_redirect_uri")
 		slog.Info("end session requested", "redirect", redirectURI)
 		if redirectURI != "" {
-			http.Redirect(w, r, redirectURI, http.StatusFound)
+			// Validate against registered client redirect URIs
+			if p.isValidPostLogoutRedirectURI(redirectURI) {
+				http.Redirect(w, r, redirectURI, http.StatusFound)
+				return
+			}
+			slog.Warn("end session: invalid post_logout_redirect_uri", "uri", redirectURI)
+			// Fall through to default behavior — redirect to login
+			bp := p.cfg.NormalizedBasePath()
+			http.Redirect(w, r, bp+"authorize", http.StatusFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><h2>You have been logged out.</h2></body></html>`))
 	}
+}
+
+// isValidPostLogoutRedirectURI checks if the URI matches any registered client's redirect URIs
+func (p *Provider) isValidPostLogoutRedirectURI(uri string) bool {
+	clients := p.store.ListClients()
+	for _, c := range clients {
+		for _, allowed := range c.RedirectURIs {
+			if allowed == "*" || allowed == uri {
+				return true
+			}
+		}
+	}
+	// Also check the global config redirect URIs
+	return p.cfg.IsValidRedirectURI(uri)
 }
 
 // ============ Token signing ============

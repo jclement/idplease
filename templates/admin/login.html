@@ -20,6 +20,7 @@
             </div>
             {{end}}
             <form method="POST" action="{{.BasePath}}admin/login" class="space-y-5">
+                {{if .CSRFToken}}<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">{{end}}
                 <div>
                     <label for="admin_key" class="block text-sm font-medium text-gray-700 mb-1">Admin Key</label>
                     <input type="password" id="admin_key" name="admin_key" required autofocus
