@@ -406,7 +406,41 @@ docker run -p 8080:8080 \
   ghcr.io/jclement/idplease:latest
 ```
 
-Or with Docker Compose:
+### Docker Compose with Cloudflare Tunnel
+
+The included `docker-compose.yml` pairs IDPlease with a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for instant TLS and public accessibility — no port forwarding or certs to manage.
+
+**Setup:**
+
+1. Create a tunnel in the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com/) and copy the tunnel token
+2. Configure the tunnel's public hostname (e.g. `idp.example.com`) to point to `http://idplease:8080`
+3. Create a `.env` file:
+   ```bash
+   cp .env.example .env
+   # Edit .env and set your TUNNEL_TOKEN
+   ```
+4. Update your `idplease.json` issuer to match the tunnel hostname:
+   ```json
+   {
+     "issuer": "https://idp.example.com",
+     "port": 8080,
+     "clientID": "my-app",
+     "redirectURIs": ["*"]
+   }
+   ```
+5. Start it:
+   ```bash
+   docker compose up -d
+   ```
+6. Manage users:
+   ```bash
+   docker compose exec idplease idplease user add bob
+   docker compose exec idplease idplease role add bob Barreleye.Admin
+   ```
+
+Your IDP is now live at `https://idp.example.com` with full TLS. 🎉
+
+### Simple Docker Compose (no tunnel)
 
 ```yaml
 services:

@@ -1,0 +1,43 @@
+##
+## IDPlease + Cloudflare Tunnel
+##
+## Quick start:
+##   1. Create a Cloudflare Tunnel in the Zero Trust dashboard
+##      and grab the tunnel token.
+##   2. Set the tunnel's public hostname to point to http://idplease:8080
+##   3. Copy this file and set your TUNNEL_TOKEN below (or use .env)
+##   4. docker compose up -d
+##   5. Manage users:
+##      docker compose exec idplease idplease user add bob
+##      docker compose exec idplease idplease role add bob Barreleye.Admin
+##
+## Your IDP will be available at https://your-tunnel-hostname
+## with full TLS handled by Cloudflare.
+##
+
+services:
+  idplease:
+    image: ghcr.io/jclement/idplease:latest
+    container_name: idplease
+    restart: unless-stopped
+    command: ["server", "--config", "/data/idplease.json"]
+    volumes:
+      - idplease-data:/data
+    expose:
+      - "8080"
+    environment:
+      - IDPLEASE_CONFIG=/data/idplease.json
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: idplease-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in .env or environment}
+    depends_on:
+      - idplease
+
+volumes:
+  idplease-data:
+    driver: local
