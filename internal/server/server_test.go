@@ -36,7 +36,7 @@ func setupServer(t *testing.T, basePath string) (*Server, *oidc.Provider) {
 	}
 	km := &cryptopkg.KeyManager{KeyID: "test-key", PrivateKey: key}
 	s, _ := store.New(cfg.UsersFile)
-	s.AddUser("testuser", "testpass", "test@example.com", "Test User")
+	_ = s.AddUser("testuser", "testpass", "test@example.com", "Test User")
 
 	provider := oidc.NewProvider(cfg, km, s)
 	srv, err := New(cfg, provider, s, testTemplates)
