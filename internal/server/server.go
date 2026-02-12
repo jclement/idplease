@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jclement/idplease/internal/admin"
 	"github.com/jclement/idplease/internal/config"
 	"github.com/jclement/idplease/internal/oidc"
 	"github.com/jclement/idplease/internal/store"
@@ -19,16 +20,22 @@ type Server struct {
 	store    *store.Store
 	tmpl     *template.Template
 	mux      *http.ServeMux
+	admin    *admin.Admin
 }
 
 func New(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates embed.FS) (*Server, error) {
-	// Try common patterns for template location
-	tmpl, err := template.ParseFS(templates, "templates/*.html")
+	return NewWithAdminKey(cfg, provider, s, templates, "")
+}
+
+func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates embed.FS, adminKey string) (*Server, error) {
+	// Parse templates with funcmap
+	tmpl, err := admin.ParseTemplates(templates)
 	if err != nil {
-		tmpl, err = template.ParseFS(templates, "testdata/*.html")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("parse templates: %w", err)
+		// Fallback to testdata for tests
+		tmpl, err = admin.ParseTestTemplates(templates)
+		if err != nil {
+			return nil, fmt.Errorf("parse templates: %w", err)
+		}
 	}
 
 	srv := &Server{
@@ -49,6 +56,14 @@ func New(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates 
 	// Also handle discovery at the standard path if basePath is not /
 	if bp != "/" {
 		srv.mux.HandleFunc("/.well-known/openid-configuration", provider.DiscoveryHandler())
+	}
+
+	// Register admin routes if admin key is set
+	if adminKey != "" {
+		a := admin.New(cfg, s, tmpl, adminKey)
+		srv.admin = a
+		a.RegisterRoutes(srv.mux)
+		slog.Info("admin UI enabled", "path", bp+"admin")
 	}
 
 	slog.Info("routes registered", "basePath", bp)

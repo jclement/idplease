@@ -192,7 +192,7 @@ func (p *Provider) TokenHandler() http.HandlerFunc {
 
 		now := time.Now()
 		claims := jwt.MapClaims{
-			"iss":                now.Unix(),
+			"iss":                strings.TrimSuffix(p.cfg.Issuer, "/"),
 			"sub":                ac.UserID,
 			"aud":                ac.ClientID,
 			"exp":                now.Add(time.Duration(p.cfg.TokenLifetime) * time.Second).Unix(),
@@ -206,9 +206,6 @@ func (p *Provider) TokenHandler() http.HandlerFunc {
 			"roles":              ac.Roles,
 			"http://schemas.microsoft.com/ws/2008/06/identity/claims/role": ac.Roles,
 		}
-
-		// Fix: issuer should be the configured issuer string, not a timestamp
-		claims["iss"] = strings.TrimSuffix(p.cfg.Issuer, "/")
 
 		if ac.Nonce != "" {
 			claims["nonce"] = ac.Nonce

@@ -8,14 +8,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var roleCmd = &cobra.Command{
-	Use:   "role",
-	Short: "Manage user roles",
+var configCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Manage configuration",
 }
 
-var roleAddCmd = &cobra.Command{
-	Use:   "add [username] [role]",
-	Short: "Add a role to a user",
+var configSetCmd = &cobra.Command{
+	Use:   "set [key] [value]",
+	Short: "Set a configuration value",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load(cfgFile)
@@ -27,39 +27,17 @@ var roleAddCmd = &cobra.Command{
 			return err
 		}
 		defer func() { _ = s.Close() }()
-		if err := s.AddRole(args[0], args[1]); err != nil {
+		if err := s.SetConfig(args[0], args[1]); err != nil {
 			return err
 		}
-		fmt.Printf("Role %q added to %q\n", args[1], args[0])
+		fmt.Printf("Config %q set to %q\n", args[0], args[1])
 		return nil
 	},
 }
 
-var roleRemoveCmd = &cobra.Command{
-	Use:   "remove [username] [role]",
-	Short: "Remove a role from a user",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(cfgFile)
-		if err != nil {
-			return err
-		}
-		s, err := store.New(cfg.DBFile)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = s.Close() }()
-		if err := s.RemoveRole(args[0], args[1]); err != nil {
-			return err
-		}
-		fmt.Printf("Role %q removed from %q\n", args[1], args[0])
-		return nil
-	},
-}
-
-var roleListCmd = &cobra.Command{
-	Use:   "list [username]",
-	Short: "List roles for a user",
+var configGetCmd = &cobra.Command{
+	Use:   "get [key]",
+	Short: "Get a configuration value",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load(cfgFile)
@@ -71,22 +49,44 @@ var roleListCmd = &cobra.Command{
 			return err
 		}
 		defer func() { _ = s.Close() }()
-		roles, err := s.ListRoles(args[0])
+		val, err := s.GetConfig(args[0])
+		if err != nil {
+			return fmt.Errorf("key %q not found", args[0])
+		}
+		fmt.Println(val)
+		return nil
+	},
+}
+
+var configListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all configuration values",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load(cfgFile)
 		if err != nil {
 			return err
 		}
-		if len(roles) == 0 {
-			fmt.Printf("No roles for %q\n", args[0])
+		s, err := store.New(cfg.DBFile)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+		all, err := s.GetAllConfig()
+		if err != nil {
+			return err
+		}
+		if len(all) == 0 {
+			fmt.Println("No configuration values set")
 			return nil
 		}
-		for _, r := range roles {
-			fmt.Println(r)
+		for k, v := range all {
+			fmt.Printf("%-20s %s\n", k, v)
 		}
 		return nil
 	},
 }
 
 func init() {
-	roleCmd.AddCommand(roleAddCmd, roleRemoveCmd, roleListCmd)
-	rootCmd.AddCommand(roleCmd)
+	configCmd.AddCommand(configSetCmd, configGetCmd, configListCmd)
+	rootCmd.AddCommand(configCmd)
 }

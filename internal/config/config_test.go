@@ -56,7 +56,7 @@ func TestLoadFromFile(t *testing.T) {
 }
 
 func TestClientIDSingle(t *testing.T) {
-	cfg := &Config{ClientID: json.RawMessage(`"my-app"`)}
+	cfg := &Config{ClientIDs: []string{"my-app"}}
 	ids := cfg.GetClientIDs()
 	if len(ids) != 1 || ids[0] != "my-app" {
 		t.Errorf("unexpected client IDs: %v", ids)
@@ -70,7 +70,7 @@ func TestClientIDSingle(t *testing.T) {
 }
 
 func TestClientIDArray(t *testing.T) {
-	cfg := &Config{ClientID: json.RawMessage(`["app1", "app2"]`)}
+	cfg := &Config{ClientIDs: []string{"app1", "app2"}}
 	ids := cfg.GetClientIDs()
 	if len(ids) != 2 {
 		t.Errorf("expected 2 client IDs, got %d", len(ids))
@@ -114,5 +114,59 @@ func TestNormalizedBasePath(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("NormalizedBasePath(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
+	}
+}
+
+func TestLoadFromStore(t *testing.T) {
+	cfg := &Config{
+		Issuer:        "http://default",
+		TokenLifetime: 3600,
+	}
+
+	configData := map[string]string{
+		"issuer":         "https://store-issuer.com",
+		"token_lifetime": "7200",
+		"display_name":   "My IDP",
+	}
+	sliceData := map[string][]string{
+		"client_ids":    {"app1", "app2"},
+		"redirect_uris": {"http://localhost/cb"},
+	}
+	mapData := map[string]map[string]string{
+		"group_mappings": {"guid1": "Admin"},
+	}
+
+	cfg.LoadFromStore(
+		func(key string) (string, error) {
+			if v, ok := configData[key]; ok {
+				return v, nil
+			}
+			return "", os.ErrNotExist
+		},
+		func(key string) ([]string, error) {
+			if v, ok := sliceData[key]; ok {
+				return v, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		func(key string) (map[string]string, error) {
+			if v, ok := mapData[key]; ok {
+				return v, nil
+			}
+			return nil, os.ErrNotExist
+		},
+	)
+
+	if cfg.Issuer != "https://store-issuer.com" {
+		t.Errorf("expected store issuer, got %s", cfg.Issuer)
+	}
+	if cfg.TokenLifetime != 7200 {
+		t.Errorf("expected 7200, got %d", cfg.TokenLifetime)
+	}
+	if cfg.DisplayName != "My IDP" {
+		t.Errorf("expected My IDP, got %s", cfg.DisplayName)
+	}
+	if len(cfg.ClientIDs) != 2 {
+		t.Errorf("expected 2 client IDs, got %d", len(cfg.ClientIDs))
 	}
 }

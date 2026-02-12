@@ -30,10 +30,14 @@ func testProvider(t *testing.T) *Provider {
 		BasePath:      "/",
 		RedirectURIs:  []string{"*"},
 		TokenLifetime: 3600,
-		ClientID:      json.RawMessage(`"test-client"`),
+		ClientIDs:     []string{"test-client"},
 	}
 	km := &cryptopkg.KeyManager{KeyID: "test-key", PrivateKey: key}
-	s := &store.Store{}
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	return &Provider{cfg: cfg, keys: km, store: s, codes: make(map[string]*AuthCode)}
 }
 
@@ -48,7 +52,9 @@ func TestDiscovery(t *testing.T) {
 	}
 
 	var doc map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil { t.Fatal(err) }
+	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
 
 	if doc["issuer"] != "http://localhost:8080" {
 		t.Errorf("unexpected issuer: %v", doc["issuer"])
@@ -80,7 +86,9 @@ func TestJWKS(t *testing.T) {
 	}
 
 	var jwks map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&jwks); err != nil { t.Fatal(err) }
+	if err := json.NewDecoder(w.Body).Decode(&jwks); err != nil {
+		t.Fatal(err)
+	}
 
 	keys := jwks["keys"].([]interface{})
 	if len(keys) != 1 {
@@ -248,7 +256,9 @@ func TestTokenEndpointPKCE(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil { t.Fatal(err) }
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp["access_token"] == nil {
 		t.Error("missing access_token")
 	}

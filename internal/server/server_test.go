@@ -4,11 +4,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"embed"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,7 +19,6 @@ import (
 //go:embed testdata
 var testTemplates embed.FS
 
-
 func setupServer(t *testing.T, basePath string) (*Server, *oidc.Provider) {
 	t.Helper()
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
@@ -31,11 +28,14 @@ func setupServer(t *testing.T, basePath string) (*Server, *oidc.Provider) {
 		BasePath:      basePath,
 		RedirectURIs:  []string{"*"},
 		TokenLifetime: 3600,
-		ClientID:      json.RawMessage(`"test-client"`),
-		UsersFile:     filepath.Join(t.TempDir(), "users.json"),
+		ClientIDs:     []string{"test-client"},
 	}
 	km := &cryptopkg.KeyManager{KeyID: "test-key", PrivateKey: key}
-	s, _ := store.New(cfg.UsersFile)
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	_ = s.AddUser("testuser", "testpass", "test@example.com", "Test User")
 
 	provider := oidc.NewProvider(cfg, km, s)
@@ -149,5 +149,3 @@ func TestBasePathRouting(t *testing.T) {
 		t.Fatalf("expected 200 at /idp/authorize, got %d", w.Code)
 	}
 }
-
-// testdata/login.html is embedded via go:embed testdata

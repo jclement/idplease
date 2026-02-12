@@ -27,10 +27,11 @@ var userAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		s, err := store.New(cfg.UsersFile)
+		s, err := store.New(cfg.DBFile)
 		if err != nil {
 			return err
 		}
+		defer func() { _ = s.Close() }()
 
 		username := args[0]
 		reader := bufio.NewReader(os.Stdin)
@@ -66,10 +67,11 @@ var userListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		s, err := store.New(cfg.UsersFile)
+		s, err := store.New(cfg.DBFile)
 		if err != nil {
 			return err
 		}
+		defer func() { _ = s.Close() }()
 
 		users := s.ListUsers()
 		if len(users) == 0 {
@@ -92,10 +94,11 @@ var userDeleteCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		s, err := store.New(cfg.UsersFile)
+		s, err := store.New(cfg.DBFile)
 		if err != nil {
 			return err
 		}
+		defer func() { _ = s.Close() }()
 
 		if err := s.DeleteUser(args[0]); err != nil {
 			return err
@@ -114,10 +117,11 @@ var userResetCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		s, err := store.New(cfg.UsersFile)
+		s, err := store.New(cfg.DBFile)
 		if err != nil {
 			return err
 		}
+		defer func() { _ = s.Close() }()
 
 		fmt.Print("New Password: ")
 		passwordBytes, err := term.ReadPassword(int(syscall.Stdin))

@@ -1,0 +1,38 @@
+{{define "admin_head"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IDPlease Admin — {{.Title}}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-50">
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+            <a href="{{.BasePath}}admin" class="text-xl font-bold">🪪 IDPlease Admin</a>
+            <div class="flex gap-4 items-center">
+                <a href="{{.BasePath}}admin" class="hover:text-indigo-200 transition">Dashboard</a>
+                <a href="{{.BasePath}}admin/settings" class="hover:text-indigo-200 transition">Settings</a>
+                <a href="{{.BasePath}}admin/users" class="hover:text-indigo-200 transition">Users</a>
+                <a href="{{.BasePath}}admin/logout" class="bg-indigo-700 hover:bg-indigo-800 px-3 py-1 rounded transition text-sm">Logout</a>
+            </div>
+        </div>
+    </nav>
+    <main class="max-w-6xl mx-auto px-4 py-8">
+{{end}}
+
+{{define "admin_flash"}}
+{{if .Flash}}
+<div class="mb-6 px-4 py-3 rounded-lg text-sm {{if eq .Flash.Type "success"}}bg-green-50 border border-green-200 text-green-700{{else}}bg-red-50 border border-red-200 text-red-700{{end}}">
+    {{.Flash.Message}}
+</div>
+{{end}}
+{{end}}
+
+{{define "admin_foot"}}
+    </main>
+    <footer class="text-center text-xs text-gray-400 py-4">IDPlease — Admin Panel</footer>
+</body>
+</html>
+{{end}}

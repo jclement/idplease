@@ -6,7 +6,7 @@ import (
 	"github.com/jclement/idplease/cmd"
 )
 
-//go:embed templates
+//go:embed templates templates/admin
 var templates embed.FS
 
 func main() {

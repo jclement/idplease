@@ -10,6 +10,9 @@ dist/
 users.json
 idplease-key.json
 idplease.json
+idplease.db
+idplease.db-wal
+idplease.db-shm
 
 # Test
 *.test

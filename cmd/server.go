@@ -21,6 +21,8 @@ func SetTemplates(t embed.FS) {
 	templates = t
 }
 
+var adminKeyFlag string
+
 var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Run the OIDC server",
@@ -37,24 +39,43 @@ var serverCmd = &cobra.Command{
 			return fmt.Errorf("load keys: %w", err)
 		}
 
-		s, err := store.New(cfg.UsersFile)
+		s, err := store.New(cfg.DBFile)
 		if err != nil {
-			return fmt.Errorf("load users: %w", err)
+			return fmt.Errorf("open database: %w", err)
 		}
+		defer func() { _ = s.Close() }()
+
+		// Load OIDC config from store (falls back to config file defaults)
+		cfg.LoadFromStore(s.GetConfig, s.GetConfigStringSlice, s.GetConfigMap)
 
 		provider := oidc.NewProvider(cfg, keys, s)
 
-		srv, err := server.New(cfg, provider, s, templates)
+		// Determine admin key
+		adminKey := adminKeyFlag
+		if adminKey == "" {
+			adminKey = os.Getenv("IDPLEASE_ADMIN_KEY")
+		}
+		if adminKey == "" {
+			adminKey = cfg.AdminKey
+		}
+		if adminKey == "" {
+			adminKey = config.GenerateSecret()[:16]
+			slog.Info("generated admin key (use --admin-key to set a persistent one)", "key", adminKey)
+		}
+
+		srv, err := server.NewWithAdminKey(cfg, provider, s, templates, adminKey)
 		if err != nil {
 			return fmt.Errorf("create server: %w", err)
 		}
 
 		addr := fmt.Sprintf(":%d", cfg.Port)
 		slog.Info("starting IDPlease server", "addr", addr, "issuer", cfg.Issuer, "basePath", cfg.NormalizedBasePath())
+		slog.Info("admin UI available", "url", cfg.Issuer+cfg.NormalizedBasePath()+"admin")
 		return http.ListenAndServe(addr, srv.Handler())
 	},
 }
 
 func init() {
+	serverCmd.Flags().StringVar(&adminKeyFlag, "admin-key", "", "Admin key for the admin UI")
 	rootCmd.AddCommand(serverCmd)
 }

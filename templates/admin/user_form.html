@@ -1,0 +1,49 @@
+{{define "admin_user_form.html"}}
+{{template "admin_head" (map "Title" .Title "BasePath" .BasePath)}}
+<h2 class="text-2xl font-bold text-gray-800 mb-6">{{.Title}}</h2>
+{{if .Error}}
+<div class="mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{{.Error}}</div>
+{{end}}
+<form method="POST" action="{{.Action}}" class="bg-white rounded-xl shadow p-6 space-y-5 max-w-lg">
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+        <input type="text" name="username" value="{{.Username}}" {{if not .IsNew}}readonly class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-500"{{else}}required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"{{end}}>
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+        <input type="email" name="email" value="{{.Email}}"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+        <input type="text" name="display_name" value="{{.DisplayName}}"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+    </div>
+    {{if .IsNew}}
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+        <input type="password" name="password" required
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+    </div>
+    {{end}}
+    <div class="flex gap-3">
+        <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-6 rounded-lg transition">
+            {{if .IsNew}}Add User{{else}}Update User{{end}}
+        </button>
+        <a href="{{.BasePath}}admin/users" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-6 rounded-lg transition">Cancel</a>
+    </div>
+</form>
+
+{{if not .IsNew}}
+<div class="mt-8 bg-white rounded-xl shadow p-6 max-w-lg">
+    <h3 class="text-lg font-semibold text-gray-800 mb-4">Reset Password</h3>
+    <form method="POST" action="{{.BasePath}}admin/users/reset-password" class="flex gap-3">
+        <input type="hidden" name="username" value="{{.Username}}">
+        <input type="password" name="password" required placeholder="New password"
+            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+        <button type="submit" class="bg-yellow-500 hover:bg-yellow-600 text-white font-medium py-2 px-4 rounded-lg transition text-sm">Reset</button>
+    </form>
+</div>
+{{end}}
+{{template "admin_foot" .}}
+{{end}}

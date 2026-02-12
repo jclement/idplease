@@ -1,0 +1,46 @@
+{{define "admin_users.html"}}
+{{template "admin_head" (map "Title" "Users" "BasePath" .BasePath)}}
+{{template "admin_flash" .}}
+<div class="flex items-center justify-between mb-6">
+    <h2 class="text-2xl font-bold text-gray-800">Users</h2>
+    <a href="{{.BasePath}}admin/users/add" class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg transition text-sm">+ Add User</a>
+</div>
+<div class="bg-white rounded-xl shadow overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-gray-50 border-b">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Username</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Display Name</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Roles</th>
+                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-200">
+            {{range .Users}}
+            <tr class="hover:bg-gray-50">
+                <td class="px-6 py-4 font-medium text-gray-900">{{.Username}}</td>
+                <td class="px-6 py-4 text-gray-600">{{.Email}}</td>
+                <td class="px-6 py-4 text-gray-600">{{.DisplayName}}</td>
+                <td class="px-6 py-4">
+                    {{range .Roles}}
+                    <span class="inline-block bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded mr-1">{{.}}</span>
+                    {{end}}
+                </td>
+                <td class="px-6 py-4 text-right space-x-2">
+                    <a href="{{$.BasePath}}admin/users/edit?username={{.Username}}" class="text-indigo-600 hover:text-indigo-800 text-sm">Edit</a>
+                    <a href="{{$.BasePath}}admin/users/roles?username={{.Username}}" class="text-blue-600 hover:text-blue-800 text-sm">Roles</a>
+                    <form method="POST" action="{{$.BasePath}}admin/users/delete" class="inline" onsubmit="return confirm('Delete user {{.Username}}?')">
+                        <input type="hidden" name="username" value="{{.Username}}">
+                        <button type="submit" class="text-red-600 hover:text-red-800 text-sm">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5" class="px-6 py-8 text-center text-gray-500">No users yet. Add one to get started.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{template "admin_foot" .}}
+{{end}}

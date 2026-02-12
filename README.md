@@ -18,14 +18,15 @@ IDPlease is a **drop-in replacement for Microsoft Entra ID** (formerly Azure AD)
 - 🧪 **Integration testing** — Spin up a predictable auth server in CI
 - 🚀 **Pilot deployments** — Lightweight auth for internal tools before committing to Entra
 - 🔌 **Entra-compatible claims** — `oid`, `upn`, `roles`, `groups`, `tid` — your app won't know the difference
-- 📦 **Single binary** — No database, no dependencies, just one executable and a couple of JSON files
+- 📦 **Single binary** — No external dependencies, just one executable with embedded SQLite
 
 **What it supports:**
 
 - OpenID Connect Authorization Code flow with PKCE (S256)
 - Standard discovery (`/.well-known/openid-configuration`) and JWKS endpoints
 - RS256-signed JWTs with auto-generated keys
-- User and role management via CLI
+- User and role management via CLI and web-based Admin UI
+- SQLite-backed storage (no external database needed)
 - Works behind reverse proxies with configurable base path
 
 **What it doesn't:**
@@ -53,26 +54,35 @@ Or use Docker:
 docker run -p 8080:8080 -v $(pwd)/data:/data ghcr.io/jclement/idplease:latest
 ```
 
-### 2. Add a user
-
-```bash
-./idplease user add bob
-# Email: bob@example.com
-# Display Name: Bob Smith
-# Password: ********
-```
-
-### 3. Add some roles (optional)
-
-```bash
-./idplease role add bob Admin
-./idplease role add bob Reader
-```
-
-### 4. Start the server
+### 2. Start the server
 
 ```bash
 ./idplease server
+```
+
+On first start, IDPlease will:
+- Create an `idplease.db` SQLite database
+- Generate an RSA signing key (`idplease-key.json`)
+- Generate a one-time admin key and print it to the console
+
+### 3. Open the Admin UI
+
+Navigate to `http://localhost:8080/admin` and enter the admin key shown in the console output.
+
+From the admin UI you can:
+- **Add users** with username, email, display name, and password
+- **Manage roles** for each user
+- **Configure OIDC settings** — issuer, client IDs, redirect URIs, group mappings, etc.
+
+### 4. Or use the CLI
+
+```bash
+# Add a user
+./idplease user add bob
+
+# Add some roles
+./idplease role add bob Admin
+./idplease role add bob Reader
 ```
 
 ### 5. Point your app at it
@@ -80,6 +90,28 @@ docker run -p 8080:8080 -v $(pwd)/data:/data ghcr.io/jclement/idplease:latest
 Discovery URL: `http://localhost:8080/.well-known/openid-configuration`
 
 That's it. Your app can now authenticate users against IDPlease.
+
+---
+
+## Admin UI
+
+IDPlease includes a built-in web admin interface at `{basePath}/admin`.
+
+### Admin Key
+
+The admin UI is protected by an admin key. You can set it in several ways (in order of priority):
+
+1. **CLI flag:** `./idplease server --admin-key=mysecret`
+2. **Environment variable:** `IDPLEASE_ADMIN_KEY=mysecret`
+3. **Config file:** `"adminKey": "mysecret"` in `idplease.json`
+4. **Auto-generated:** If none of the above are set, a random key is generated and printed to stdout on startup
+
+### Admin Pages
+
+- **Dashboard** — Overview: user count, configured issuer, client IDs
+- **Settings** — Edit: display name, issuer URL, client IDs, tenant ID, token lifetime, redirect URIs, group mappings, session secret
+- **Users** — List, add, edit, delete users; reset passwords
+- **Roles** — Per-user role management: add/remove roles
 
 ---
 
@@ -93,6 +125,9 @@ All commands support `--config <path>` to specify an alternate config file (defa
 # Start the OIDC server
 ./idplease server
 
+# Start with a custom admin key
+./idplease server --admin-key=mysecretkey
+
 # Start with a custom config
 ./idplease server --config /etc/idplease/config.json
 ```
@@ -105,9 +140,6 @@ All commands support `--config <path>` to specify an alternate config file (defa
 
 # List all users
 ./idplease user list
-# Output:
-# alice                alice@example.com              Alice Johnson
-# bob                  bob@example.com                Bob Smith
 
 # Delete a user
 ./idplease user delete alice
@@ -122,147 +154,88 @@ All commands support `--config <path>` to specify an alternate config file (defa
 # Add a role to a user
 ./idplease role add bob Barreleye.Admin
 
-# Add multiple roles
-./idplease role add bob Barreleye.Update
-./idplease role add bob Barreleye.Read
-
 # List roles for a user
 ./idplease role list bob
-# Output:
-# Barreleye.Admin
-# Barreleye.Update
-# Barreleye.Read
 
 # Remove a role
 ./idplease role remove bob Barreleye.Update
+```
+
+### Configuration
+
+```bash
+# Set a config value
+./idplease config set issuer https://idp.example.com
+
+# Get a config value
+./idplease config get issuer
+
+# List all config values
+./idplease config list
 ```
 
 ---
 
 ## Configuration
 
-IDPlease uses a JSON config file (default: `idplease.json`). If the file doesn't exist, sensible defaults are used.
+IDPlease uses a JSON config file (`idplease.json`) for server-level settings and SQLite for OIDC/user configuration.
 
-### Configuration Reference
+### Config File (idplease.json)
+
+The config file contains server-level settings:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `issuer` | `string` | `http://localhost:8080` | The OIDC issuer URL. Must match what your app expects. |
-| `port` | `int` | `8080` | HTTP listen port. |
-| `basePath` | `string` | `/` | Base path for all routes. Set this when running behind a reverse proxy at a sub-path (e.g., `/idp`). |
-| `clientID` | `string` or `string[]` | `idplease` | Allowed OIDC client ID(s). Can be a single string or an array of strings. |
-| `tenantID` | `string` | *(none)* | Optional tenant ID, included as the `tid` claim in tokens. |
-| `tokenLifetime` | `int` | `3600` | Token lifetime in seconds. |
-| `redirectURIs` | `string[]` | `["*"]` | Allowed redirect URIs. Use `["*"]` to allow any (convenient for development). |
-| `sessionSecret` | `string` | *(auto-generated)* | Secret for session signing. Auto-generated on first run if not set. |
-| `groupMapping` | `object` | *(none)* | Maps group GUIDs to role names. Users with the role get the corresponding group GUID in their `groups` claim. |
-| `usersFile` | `string` | `users.json` | Path to the users data file. |
-| `keyFile` | `string` | `idplease-key.json` | Path to the RSA signing key file. Auto-generated on first run. |
+| `port` | `int` | `8080` | HTTP listen port |
+| `keyFile` | `string` | `idplease-key.json` | Path to the RSA signing key file |
+| `dbFile` | `string` | `idplease.db` | Path to the SQLite database |
+| `adminKey` | `string` | *(auto-generated)* | Admin key for the admin UI |
 
-### Example: Standalone Development
+### OIDC Settings (in SQLite, managed via Admin UI or CLI)
 
-```json
-{
-  "issuer": "http://localhost:8080",
-  "port": 8080,
-  "clientID": "my-spa",
-  "redirectURIs": ["http://localhost:3000/callback", "http://localhost:5173/callback"]
-}
-```
+These settings are stored in the SQLite database and can be edited via the Admin UI or `./idplease config set`:
 
-### Example: Behind a Reverse Proxy
+| Key | Description |
+|-----|-------------|
+| `issuer` | The OIDC issuer URL |
+| `display_name` | Display name for the IDP |
+| `base_path` | Base path for all routes |
+| `client_ids` | Allowed OIDC client IDs (JSON array) |
+| `tenant_id` | Tenant ID for the `tid` claim |
+| `token_lifetime` | Token lifetime in seconds |
+| `redirect_uris` | Allowed redirect URIs (JSON array) |
+| `group_mappings` | Maps group GUIDs to role names (JSON object) |
+| `session_secret` | Secret for session signing |
 
-If your reverse proxy forwards `/idp/` to IDPlease:
+### Legacy Config File Support
 
-```json
-{
-  "issuer": "https://myapp.example.com/idp",
-  "port": 8080,
-  "basePath": "/idp",
-  "clientID": "my-app",
-  "tenantID": "00000000-0000-0000-0000-000000000000",
-  "redirectURIs": ["https://myapp.example.com/signin-oidc"]
-}
-```
+For backward compatibility, IDPlease will read OIDC settings from the JSON config file if they haven't been set in SQLite yet. Fields like `issuer`, `clientID`, `basePath`, etc. in the JSON file serve as defaults that can be overridden via the Admin UI or CLI.
 
-Nginx config:
-
-```nginx
-location /idp/ {
-    proxy_pass http://127.0.0.1:8080/idp/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
-### Example: Entra ID Drop-in with Roles and Groups
+### Example: idplease.json
 
 ```json
 {
-  "issuer": "http://localhost:8080",
   "port": 8080,
-  "clientID": ["frontend-spa", "backend-api"],
-  "tenantID": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "tokenLifetime": 7200,
-  "redirectURIs": [
-    "http://localhost:3000/callback",
-    "http://localhost:5000/signin-oidc"
-  ],
-  "groupMapping": {
-    "11111111-1111-1111-1111-111111111111": "Barreleye.Admin",
-    "22222222-2222-2222-2222-222222222222": "Barreleye.Update"
-  }
+  "adminKey": "my-secret-admin-key",
+  "dbFile": "/data/idplease.db",
+  "keyFile": "/data/idplease-key.json"
 }
 ```
-
-With this config, if user `bob` has the role `Barreleye.Admin`, his token will include:
-- `"roles": ["Barreleye.Admin"]`
-- `"groups": ["11111111-1111-1111-1111-111111111111"]`
 
 ---
 
 ## OIDC Endpoints
 
-All endpoints are relative to the configured `basePath` (default `/`).
+All endpoints are relative to the configured base path (default `/`).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/.well-known/openid-configuration` | GET | OpenID Connect Discovery document |
-| `/.well-known/openid-configuration/keys` | GET | JWKS (JSON Web Key Set) with the RSA public key |
+| `/.well-known/openid-configuration/keys` | GET | JWKS with the RSA public key |
 | `/authorize` | GET | Shows the login form |
 | `/authorize` | POST | Processes login, returns auth code via redirect |
 | `/token` | POST | Exchanges authorization code for tokens |
-
-### Discovery Document
-
-```
-GET /.well-known/openid-configuration
-```
-
-Returns the standard OIDC discovery document with endpoints, supported scopes, signing algorithms, and PKCE support.
-
-### Token Exchange
-
-```
-POST /token
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=authorization_code
-&code=<auth_code>
-&redirect_uri=<redirect_uri>
-&code_verifier=<pkce_verifier>
-```
-
-Returns:
-
-```json
-{
-  "access_token": "eyJhbGciOi...",
-  "id_token": "eyJhbGciOi...",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
-```
+| `/admin` | GET | Admin UI (requires admin key) |
 
 ---
 
@@ -272,187 +245,54 @@ IDPlease tokens include the following claims, designed for compatibility with Mi
 
 | Claim | Type | Description |
 |-------|------|-------------|
-| `iss` | `string` | Issuer URL (from config) |
+| `iss` | `string` | Issuer URL |
 | `sub` | `string` | User ID (UUID) |
 | `aud` | `string` | Client ID |
-| `exp` | `number` | Expiration time (Unix timestamp) |
-| `iat` | `number` | Issued at (Unix timestamp) |
-| `nbf` | `number` | Not before (Unix timestamp) |
-| `oid` | `string` | Object ID — same as `sub` (Entra compatibility) |
-| `preferred_username` | `string` | Username or email |
-| `upn` | `string` | User Principal Name — same as `preferred_username` |
+| `exp` | `number` | Expiration time |
+| `iat` | `number` | Issued at |
+| `oid` | `string` | Object ID (same as `sub`) |
+| `preferred_username` | `string` | Username |
+| `upn` | `string` | User Principal Name |
 | `name` | `string` | Display name |
 | `email` | `string` | Email address |
-| `roles` | `string[]` | Application roles assigned to the user |
-| `groups` | `string[]` | Group GUIDs (populated via `groupMapping` config) |
+| `roles` | `string[]` | Application roles |
+| `groups` | `string[]` | Group GUIDs (via group mappings) |
 | `tid` | `string` | Tenant ID (if configured) |
-| `nonce` | `string` | Nonce (if provided in auth request) |
-| `http://schemas.microsoft.com/ws/2008/06/identity/claims/role` | `string[]` | URN-style roles claim (Entra/WS-Fed compatibility) |
-
----
-
-## How to Use with MSAL
-
-IDPlease works with [MSAL](https://learn.microsoft.com/en-us/entra/msal/) (Microsoft Authentication Library) and any OIDC-compliant client.
-
-### ASP.NET Core
-
-```csharp
-builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
-    .AddMicrosoftIdentityWebApp(options =>
-    {
-        options.Instance = ""; // Not used — override Authority
-        options.TenantId = "not-used";
-        options.ClientId = "my-app";
-        options.Authority = "http://localhost:8080";
-        options.ResponseType = "code";
-        options.UsePkce = true;
-        // For development, disable HTTPS requirement
-        options.RequireHttpsMetadata = false;
-    });
-```
-
-Or with generic OIDC:
-
-```csharp
-builder.Services.AddAuthentication(options =>
-{
-    options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
-    options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
-})
-.AddCookie()
-.AddOpenIdConnect(options =>
-{
-    options.Authority = "http://localhost:8080";
-    options.ClientId = "my-app";
-    options.ResponseType = "code";
-    options.UsePkce = true;
-    options.RequireHttpsMetadata = false;
-    options.GetClaimsFromUserInfoEndpoint = false;
-    options.Scope.Add("openid");
-    options.Scope.Add("profile");
-    options.Scope.Add("email");
-    options.TokenValidationParameters.NameClaimType = "name";
-    options.TokenValidationParameters.RoleClaimType = "roles";
-});
-```
-
-### MSAL.js (SPA)
-
-```javascript
-const msalConfig = {
-  auth: {
-    clientId: "my-spa",
-    authority: "http://localhost:8080",
-    knownAuthorities: ["localhost"],
-    redirectUri: "http://localhost:3000/callback",
-  },
-};
-
-const pca = new msal.PublicClientApplication(msalConfig);
-```
-
-> **Note:** MSAL libraries may enforce HTTPS in some configurations. For local development, you may need to disable strict validation or use a simpler OIDC client library.
-
-### JWT Validation (API Backend)
-
-For backend services that only need to validate tokens (not initiate login), configure JWT Bearer authentication to use IDPlease's JWKS:
-
-```csharp
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.Authority = "http://localhost:8080";
-        options.RequireHttpsMetadata = false;
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuer = "http://localhost:8080",
-            ValidateAudience = true,
-            ValidAudience = "my-app",
-            RoleClaimType = "roles",
-        };
-    });
-```
-
----
-
-## Data Files
-
-IDPlease stores all data in JSON files (no database required):
-
-| File | Description |
-|------|-------------|
-| `idplease.json` | Configuration (you create this) |
-| `users.json` | Users and roles (managed via CLI, passwords bcrypt-hashed) |
-| `idplease-key.json` | RSA signing key (auto-generated, **keep this safe**) |
-
-All files are created in the working directory by default. Paths are configurable in `idplease.json`.
-
-> ⚠️ **Backup `idplease-key.json`** if token continuity matters. Regenerating the key invalidates all previously issued tokens.
 
 ---
 
 ## Docker
 
 ```bash
-# Build
-docker build -t idplease .
-
 # Run
-docker run -p 8080:8080 \
-  -v $(pwd)/data:/data \
-  -w /data \
-  ghcr.io/jclement/idplease:latest
+docker run -p 8080:8080 -v $(pwd)/data:/data ghcr.io/jclement/idplease:latest
 ```
+
+The SQLite database, key file, and config are all stored in `/data`.
 
 ### Docker Compose with Cloudflare Tunnel
 
-The included `docker-compose.yml` pairs IDPlease with a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for instant TLS and public accessibility — no port forwarding or certs to manage.
+See `docker-compose.yml` for a complete example pairing IDPlease with a Cloudflare Tunnel.
 
-**Setup:**
+```bash
+docker compose up -d
 
-1. Create a tunnel in the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com/) and copy the tunnel token
-2. Configure the tunnel's public hostname (e.g. `idp.example.com`) to point to `http://idplease:8080`
-3. Create a `.env` file:
-   ```bash
-   cp .env.example .env
-   # Edit .env and set your TUNNEL_TOKEN
-   ```
-4. Update your `idplease.json` issuer to match the tunnel hostname:
-   ```json
-   {
-     "issuer": "https://idp.example.com",
-     "port": 8080,
-     "clientID": "my-app",
-     "redirectURIs": ["*"]
-   }
-   ```
-5. Start it:
-   ```bash
-   docker compose up -d
-   ```
-6. Manage users:
-   ```bash
-   docker compose exec idplease idplease user add bob
-   docker compose exec idplease idplease role add bob Barreleye.Admin
-   ```
-
-Your IDP is now live at `https://idp.example.com` with full TLS. 🎉
-
-### Simple Docker Compose (no tunnel)
-
-```yaml
-services:
-  idplease:
-    image: ghcr.io/jclement/idplease:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./idplease-data:/data
-    working_dir: /data
-    command: ["server", "--config", "/data/idplease.json"]
+# Manage users
+docker compose exec idplease idplease user add bob
+docker compose exec idplease idplease role add bob Admin
 ```
+
+---
+
+## Data Files
+
+| File | Description |
+|------|-------------|
+| `idplease.json` | Server config (port, key file path, db path, admin key) |
+| `idplease.db` | SQLite database (users, roles, OIDC config) |
+| `idplease-key.json` | RSA signing key (auto-generated) |
+
+> ⚠️ **Backup `idplease-key.json`** if token continuity matters. Regenerating the key invalidates all previously issued tokens.
 
 ---
 
@@ -467,33 +307,6 @@ go build -o idplease .
 ### Running Tests
 
 ```bash
-go test ./...
-```
-
-### Building Releases
-
-```bash
-goreleaser release --snapshot --clean
-```
-
----
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Write tests for new functionality
-4. Ensure `go test ./...` and `go vet ./...` pass
-5. Submit a pull request
-
-### Development Setup
-
-```bash
-git clone https://github.com/jclement/idplease.git
-cd idplease
-go mod tidy
 go test ./...
 ```
 
