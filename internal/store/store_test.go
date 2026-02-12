@@ -1,18 +1,16 @@
 package store
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
 func tempStore(t *testing.T) *Store {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "users.json")
-	s, err := New(path)
+	s, err := New(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -144,16 +142,23 @@ func TestRoles(t *testing.T) {
 }
 
 func TestPersistence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "users.json")
-	s, _ := New(path)
+	// Use a temp file for persistence test
+	path := t.TempDir() + "/test.db"
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	_ = s.AddRole("bob", "Admin")
+	_ = s.Close()
 
 	// Reload
 	s2, err := New(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = s2.Close() }()
+
 	users := s2.ListUsers()
 	if len(users) != 1 {
 		t.Fatal("expected 1 user after reload")
@@ -163,14 +168,78 @@ func TestPersistence(t *testing.T) {
 	}
 }
 
-func TestNewFromNonExistentFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nonexistent", "users.json")
-	_, err := New(path)
-	// Should fail because parent dir doesn't exist... actually os.ReadFile returns not-exist
-	// and we handle that, so it should succeed with empty store
-	// But save will fail. Let's just test loading works.
-	if err != nil && !os.IsNotExist(err) {
-		// Accept both nil error and not-exist cascading
-		t.Logf("got error: %v (acceptable)", err)
+func TestConfig(t *testing.T) {
+	s := tempStore(t)
+
+	if err := s.SetConfig("issuer", "http://localhost:8080"); err != nil {
+		t.Fatal(err)
+	}
+	val, err := s.GetConfig("issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != "http://localhost:8080" {
+		t.Errorf("expected http://localhost:8080, got %s", val)
+	}
+
+	// Update
+	if err := s.SetConfig("issuer", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	val, err = s.GetConfig("issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != "https://example.com" {
+		t.Errorf("expected https://example.com, got %s", val)
+	}
+
+	// Get all
+	_ = s.SetConfig("port", "9090")
+	all, err := s.GetAllConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Errorf("expected 2 config items, got %d", len(all))
+	}
+}
+
+func TestUserCount(t *testing.T) {
+	s := tempStore(t)
+	count, err := s.UserCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0, got %d", count)
+	}
+
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	count, err = s.UserCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1, got %d", count)
+	}
+}
+
+func TestUpdateUser(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+
+	if err := s.UpdateUser("bob", "newemail@test.com", "New Bob"); err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.GetUser("bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Email != "newemail@test.com" {
+		t.Errorf("expected newemail@test.com, got %s", u.Email)
+	}
+	if u.DisplayName != "New Bob" {
+		t.Errorf("expected New Bob, got %s", u.DisplayName)
 	}
 }
