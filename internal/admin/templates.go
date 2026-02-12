@@ -53,9 +53,16 @@ func ParseTestTemplates(templates embed.FS) (*template.Template, error) {
 	}
 
 	tmpl := template.New("").Funcs(funcMap)
+	// Try testdata/*.html first
 	tmpl, err := tmpl.ParseFS(templates, "testdata/*.html")
 	if err != nil {
-		return nil, err
+		// Try testdata/templates/admin/*.html (server tests)
+		tmpl2 := template.New("").Funcs(funcMap)
+		tmpl2, err2 := tmpl2.ParseFS(templates, "testdata/templates/admin/*.html")
+		if err2 != nil {
+			return nil, err // return original error
+		}
+		return tmpl2, nil
 	}
 	return tmpl, nil
 }

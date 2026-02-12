@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"embed"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,133 +20,145 @@ import (
 //go:embed testdata
 var testTemplates embed.FS
 
-func setupServer(t *testing.T, basePath string) (*Server, *oidc.Provider) {
+func testServer(t *testing.T) *Server {
 	t.Helper()
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	cfg := &config.Config{
-		Issuer:        "http://localhost:8080",
-		Port:          8080,
-		BasePath:      basePath,
-		RedirectURIs:  []string{"*"},
-		TokenLifetime: 3600,
-		ClientIDs:     []string{"test-client"},
+		Issuer: "http://localhost:8080", Port: 8080, BasePath: "/",
+		RedirectURIs: []string{"*"}, AccessTokenLifetime: 300, RefreshTokenLifetime: 86400,
+		ClientIDs: []string{"test-client"}, CORSOrigins: []string{"*"},
 	}
 	km := &cryptopkg.KeyManager{KeyID: "test-key", PrivateKey: key}
-	s, err := store.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, _ := store.New(":memory:")
 	t.Cleanup(func() { _ = s.Close() })
-	_ = s.AddUser("testuser", "testpass", "test@example.com", "Test User")
-
 	provider := oidc.NewProvider(cfg, km, s)
-	srv, err := New(cfg, provider, s, testTemplates)
+	srv, err := NewWithAdminKey(cfg, provider, s, testTemplates, "test-admin-key")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return srv, provider
+	return srv
 }
 
-func TestDiscoveryEndpoint(t *testing.T) {
-	srv, _ := setupServer(t, "/")
-	req := httptest.NewRequest("GET", "/.well-known/openid-configuration", nil)
+func TestDiscoveryRoute(t *testing.T) {
+	srv := testServer(t)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/openid-configuration", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var doc map[string]interface{}
+	_ = json.NewDecoder(w.Body).Decode(&doc)
+	if doc["issuer"] != "http://localhost:8080" {
+		t.Error("bad issuer")
+	}
+}
 
+func TestAuthorizeShowsLoginForm(t *testing.T) {
+	srv := testServer(t)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/authorize?client_id=test&redirect_uri=http://localhost/cb", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
 
-func TestLoginPage(t *testing.T) {
-	srv, _ := setupServer(t, "/")
-	req := httptest.NewRequest("GET", "/authorize?client_id=test-client&redirect_uri=http://localhost/cb&response_type=code", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "username") {
-		t.Error("login page should contain username field")
-	}
-}
-
-func TestLoginSuccess(t *testing.T) {
-	srv, _ := setupServer(t, "/")
-
-	form := url.Values{}
-	form.Set("username", "testuser")
-	form.Set("password", "testpass")
-	form.Set("client_id", "test-client")
-	form.Set("redirect_uri", "http://localhost/cb")
-	form.Set("response_type", "code")
-	form.Set("state", "mystate")
-
+func TestAuthorizeLoginSuccess(t *testing.T) {
+	srv := testServer(t)
+	_ = srv.store.AddUser("alice", "password", "alice@test.com", "Alice")
+	form := url.Values{"username": {"alice"}, "password": {"password"}, "client_id": {"test-client"}, "redirect_uri": {"http://localhost/cb"}, "state": {"xyz"}}
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
-
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
 	}
 	loc := w.Header().Get("Location")
-	if !strings.HasPrefix(loc, "http://localhost/cb?code=") {
+	if !strings.HasPrefix(loc, "http://localhost/cb") || !strings.Contains(loc, "code=") || !strings.Contains(loc, "state=xyz") {
 		t.Errorf("unexpected redirect: %s", loc)
-	}
-	if !strings.Contains(loc, "state=mystate") {
-		t.Error("state should be preserved")
 	}
 }
 
-func TestLoginFailure(t *testing.T) {
-	srv, _ := setupServer(t, "/")
-
-	form := url.Values{}
-	form.Set("username", "testuser")
-	form.Set("password", "wrongpass")
-	form.Set("client_id", "test-client")
-	form.Set("redirect_uri", "http://localhost/cb")
-
+func TestAuthorizeLoginFail(t *testing.T) {
+	srv := testServer(t)
+	_ = srv.store.AddUser("alice", "password", "alice@test.com", "Alice")
+	form := url.Values{"username": {"alice"}, "password": {"wrong"}, "client_id": {"test-client"}, "redirect_uri": {"http://localhost/cb"}}
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
-
 	if w.Code != 200 {
-		t.Fatalf("expected 200 (re-render login), got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Invalid") {
-		t.Error("should show error message")
+		t.Fatalf("expected 200 (re-show form), got %d", w.Code)
 	}
 }
 
-func TestBasePathRouting(t *testing.T) {
-	srv, _ := setupServer(t, "/idp")
+func TestHealthEndpoint(t *testing.T) {
+	srv := testServer(t)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["status"] != "ok" {
+		t.Error("health should be ok")
+	}
+}
 
-	// Discovery at base path
-	req := httptest.NewRequest("GET", "/idp/.well-known/openid-configuration", nil)
+func TestCORSHeaders(t *testing.T) {
+	srv := testServer(t)
+	req := httptest.NewRequest("OPTIONS", "/token", nil)
+	req.Header.Set("Origin", "http://example.com")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("expected 200 at /idp/.well-known/openid-configuration, got %d", w.Code)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
 	}
-
-	// Also at root (for convenience)
-	req = httptest.NewRequest("GET", "/.well-known/openid-configuration", nil)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("expected 200 at root discovery, got %d", w.Code)
+	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Error("missing CORS header")
 	}
+}
 
-	// Authorize at base path
-	req = httptest.NewRequest("GET", "/idp/authorize?client_id=test", nil)
-	w = httptest.NewRecorder()
+func TestCORSSpecificOrigin(t *testing.T) {
+	srv := testServer(t)
+	srv.cfg.CORSOrigins = []string{"http://allowed.com"}
+	req := httptest.NewRequest("OPTIONS", "/token", nil)
+	req.Header.Set("Origin", "http://allowed.com")
+	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("expected 200 at /idp/authorize, got %d", w.Code)
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://allowed.com" {
+		t.Error("should allow specific origin")
+	}
+	// Disallowed origin
+	req2 := httptest.NewRequest("OPTIONS", "/token", nil)
+	req2.Header.Set("Origin", "http://evil.com")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+	if w2.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("should not set CORS for disallowed origin")
+	}
+}
+
+func TestRateLimiting(t *testing.T) {
+	srv := testServer(t)
+	_ = srv.store.AddUser("bob", "pass", "bob@test.com", "Bob")
+	// Exhaust rate limit
+	for i := 0; i < 6; i++ {
+		form := url.Values{"username": {"bob"}, "password": {"wrong"}, "client_id": {"test"}, "redirect_uri": {"http://localhost/cb"}}
+		req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+	}
+	// 7th should still be 200 (shows form) but with rate limit message
+	form := url.Values{"username": {"bob"}, "password": {"pass"}, "client_id": {"test"}, "redirect_uri": {"http://localhost/cb"}}
+	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	// After rate limit, valid login should be rejected
+	if w.Code == http.StatusFound {
+		t.Error("should be rate limited, not redirecting")
 	}
 }

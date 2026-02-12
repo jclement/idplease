@@ -20,21 +20,26 @@ IDPlease is a **drop-in replacement for Microsoft Entra ID** (formerly Azure AD)
 - 🔌 **Entra-compatible claims** — `oid`, `upn`, `roles`, `groups`, `tid` — your app won't know the difference
 - 📦 **Single binary** — No external dependencies, just one executable with embedded SQLite
 
-**What it supports:**
+**Features:**
 
 - OpenID Connect Authorization Code flow with PKCE (S256)
+- Client Credentials flow (machine-to-machine)
+- Refresh token support with rotation
+- Client registry with public and confidential clients
+- UserInfo endpoint
+- Token revocation (RFC 7009)
+- End session / logout endpoint
 - Standard discovery (`/.well-known/openid-configuration`) and JWKS endpoints
 - RS256-signed JWTs with auto-generated keys
 - User and role management via CLI and web-based Admin UI
+- Client management via CLI and Admin UI
+- Rate limiting on login attempts (per-user and per-IP)
+- CORS support with configurable origins
+- Health check endpoint
+- First-run bootstrap user
+- Structured logging (slog)
 - SQLite-backed storage (no external database needed)
 - Works behind reverse proxies with configurable base path
-
-**What it doesn't:**
-
-- Client Credentials flow (machine-to-machine)
-- Refresh tokens
-- Multi-tenant federation
-- Production-grade security (it's a dev tool!)
 
 ---
 
@@ -64,15 +69,22 @@ On first start, IDPlease will:
 - Create an `idplease.db` SQLite database
 - Generate an RSA signing key (`idplease-key.json`)
 - Generate a one-time admin key and print it to the console
+- **Create a bootstrap `admin` user** with a random password (printed to stdout)
+
+Override bootstrap credentials with environment variables:
+```bash
+IDPLEASE_ADMIN_USER=myadmin IDPLEASE_ADMIN_PASSWORD=mypassword ./idplease server
+```
 
 ### 3. Open the Admin UI
 
 Navigate to `http://localhost:8080/admin` and enter the admin key shown in the console output.
 
 From the admin UI you can:
-- **Add users** with username, email, display name, and password
+- **Manage users** — add, edit, delete users; reset passwords
 - **Manage roles** for each user
-- **Configure OIDC settings** — issuer, client IDs, redirect URIs, group mappings, etc.
+- **Manage OAuth clients** — add, edit, delete clients (public or confidential)
+- **Configure settings** — issuer, token lifetimes, redirect URIs, CORS origins, group mappings, etc.
 
 ### 4. Or use the CLI
 
@@ -83,6 +95,12 @@ From the admin UI you can:
 # Add some roles
 ./idplease role add bob Admin
 ./idplease role add bob Reader
+
+# Add an OAuth client
+./idplease client add my-spa
+
+# List clients
+./idplease client list
 ```
 
 ### 5. Point your app at it
@@ -90,6 +108,42 @@ From the admin UI you can:
 Discovery URL: `http://localhost:8080/.well-known/openid-configuration`
 
 That's it. Your app can now authenticate users against IDPlease.
+
+---
+
+## OIDC Endpoints
+
+All endpoints are relative to the configured base path (default `/`).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/.well-known/openid-configuration` | GET | OpenID Connect Discovery document |
+| `/.well-known/openid-configuration/keys` | GET | JWKS with the RSA public key |
+| `/authorize` | GET/POST | Authorization endpoint (shows login form, processes login) |
+| `/token` | POST | Token endpoint (authorization_code, refresh_token, client_credentials) |
+| `/userinfo` | GET/POST | UserInfo endpoint (returns claims for Bearer token) |
+| `/revoke` | POST | Token revocation (RFC 7009) |
+| `/end-session` | GET | End session / logout |
+| `/health` | GET | Health check (`{"status":"ok","version":"..."}`) |
+| `/admin` | GET | Admin UI (requires admin key) |
+
+### Token Endpoint Grant Types
+
+- **`authorization_code`** — Standard OIDC auth code exchange, optionally with PKCE
+- **`refresh_token`** — Refresh token rotation (issues new access + refresh token, revokes old)
+- **`client_credentials`** — Machine-to-machine (confidential clients only, no id_token/refresh_token)
+
+### CORS
+
+CORS headers are applied to `/token`, `/userinfo`, `/revoke`, and JWKS endpoints. Configure allowed origins via Admin UI or config (default: `["*"]`).
+
+### Rate Limiting
+
+Login attempts are rate-limited:
+- **Per username:** 5 attempts per minute
+- **Per IP:** 20 attempts per minute
+
+Exceeding the limit shows a "too many attempts" error on the login form.
 
 ---
 
@@ -108,10 +162,11 @@ The admin UI is protected by an admin key. You can set it in several ways (in or
 
 ### Admin Pages
 
-- **Dashboard** — Overview: user count, configured issuer, client IDs
-- **Settings** — Edit: display name, issuer URL, client IDs, tenant ID, token lifetime, redirect URIs, group mappings, session secret
+- **Dashboard** — Overview: user count, client count, configured issuer
+- **Settings** — Edit: display name, issuer URL, client IDs, tenant ID, access/refresh token lifetimes, redirect URIs, CORS origins, group mappings, session secret
 - **Users** — List, add, edit, delete users; reset passwords
 - **Roles** — Per-user role management: add/remove roles
+- **Clients** — List, add, delete OAuth clients (public or confidential)
 
 ---
 
@@ -122,55 +177,41 @@ All commands support `--config <path>` to specify an alternate config file (defa
 ### Server
 
 ```bash
-# Start the OIDC server
 ./idplease server
-
-# Start with a custom admin key
 ./idplease server --admin-key=mysecretkey
-
-# Start with a custom config
 ./idplease server --config /etc/idplease/config.json
 ```
 
 ### User Management
 
 ```bash
-# Add a new user (interactive — prompts for email, display name, password)
-./idplease user add alice
-
-# List all users
+./idplease user add alice       # Interactive: prompts for email, display name, password
 ./idplease user list
-
-# Delete a user
 ./idplease user delete alice
-
-# Reset a user's password (prompts for new password)
-./idplease user reset bob
+./idplease user reset bob       # Prompts for new password
 ```
 
 ### Role Management
 
 ```bash
-# Add a role to a user
-./idplease role add bob Barreleye.Admin
-
-# List roles for a user
+./idplease role add bob Admin
 ./idplease role list bob
+./idplease role remove bob Admin
+```
 
-# Remove a role
-./idplease role remove bob Barreleye.Update
+### Client Management
+
+```bash
+./idplease client add my-app    # Interactive: prompts for name, type, redirect URIs
+./idplease client list
+./idplease client delete my-app
 ```
 
 ### Configuration
 
 ```bash
-# Set a config value
 ./idplease config set issuer https://idp.example.com
-
-# Get a config value
 ./idplease config get issuer
-
-# List all config values
 ./idplease config list
 ```
 
@@ -182,8 +223,6 @@ IDPlease uses a JSON config file (`idplease.json`) for server-level settings and
 
 ### Config File (idplease.json)
 
-The config file contains server-level settings:
-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `port` | `int` | `8080` | HTTP listen port |
@@ -193,8 +232,6 @@ The config file contains server-level settings:
 
 ### OIDC Settings (in SQLite, managed via Admin UI or CLI)
 
-These settings are stored in the SQLite database and can be edited via the Admin UI or `./idplease config set`:
-
 | Key | Description |
 |-----|-------------|
 | `issuer` | The OIDC issuer URL |
@@ -202,14 +239,12 @@ These settings are stored in the SQLite database and can be edited via the Admin
 | `base_path` | Base path for all routes |
 | `client_ids` | Allowed OIDC client IDs (JSON array) |
 | `tenant_id` | Tenant ID for the `tid` claim |
-| `token_lifetime` | Token lifetime in seconds |
+| `access_token_lifetime` | Access token lifetime in seconds (default: 300) |
+| `refresh_token_lifetime` | Refresh token lifetime in seconds (default: 86400) |
 | `redirect_uris` | Allowed redirect URIs (JSON array) |
+| `cors_origins` | Allowed CORS origins (JSON array, default: `["*"]`) |
 | `group_mappings` | Maps group GUIDs to role names (JSON object) |
 | `session_secret` | Secret for session signing |
-
-### Legacy Config File Support
-
-For backward compatibility, IDPlease will read OIDC settings from the JSON config file if they haven't been set in SQLite yet. Fields like `issuer`, `clientID`, `basePath`, etc. in the JSON file serve as defaults that can be overridden via the Admin UI or CLI.
 
 ### Example: idplease.json
 
@@ -222,20 +257,13 @@ For backward compatibility, IDPlease will read OIDC settings from the JSON confi
 }
 ```
 
----
+### Environment Variables
 
-## OIDC Endpoints
-
-All endpoints are relative to the configured base path (default `/`).
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/.well-known/openid-configuration` | GET | OpenID Connect Discovery document |
-| `/.well-known/openid-configuration/keys` | GET | JWKS with the RSA public key |
-| `/authorize` | GET | Shows the login form |
-| `/authorize` | POST | Processes login, returns auth code via redirect |
-| `/token` | POST | Exchanges authorization code for tokens |
-| `/admin` | GET | Admin UI (requires admin key) |
+| Variable | Description |
+|----------|-------------|
+| `IDPLEASE_ADMIN_KEY` | Admin key for the admin UI |
+| `IDPLEASE_ADMIN_USER` | Bootstrap admin username (default: `admin`) |
+| `IDPLEASE_ADMIN_PASSWORD` | Bootstrap admin password (default: random) |
 
 ---
 
@@ -246,7 +274,7 @@ IDPlease tokens include the following claims, designed for compatibility with Mi
 | Claim | Type | Description |
 |-------|------|-------------|
 | `iss` | `string` | Issuer URL |
-| `sub` | `string` | User ID (UUID) |
+| `sub` | `string` | User ID (UUID) or Client ID (for client_credentials) |
 | `aud` | `string` | Client ID |
 | `exp` | `number` | Expiration time |
 | `iat` | `number` | Issued at |
@@ -258,13 +286,23 @@ IDPlease tokens include the following claims, designed for compatibility with Mi
 | `roles` | `string[]` | Application roles |
 | `groups` | `string[]` | Group GUIDs (via group mappings) |
 | `tid` | `string` | Tenant ID (if configured) |
+| `nonce` | `string` | Nonce (if provided in auth request) |
+
+---
+
+## First-Run Bootstrap
+
+On first startup with an empty database, IDPlease automatically creates an `admin` user with:
+- A randomly generated 16-character password
+- The `IDPlease.Admin` role
+
+Credentials are printed prominently to stdout. Override with `IDPLEASE_ADMIN_USER` and `IDPLEASE_ADMIN_PASSWORD` environment variables.
 
 ---
 
 ## Docker
 
 ```bash
-# Run
 docker run -p 8080:8080 -v $(pwd)/data:/data ghcr.io/jclement/idplease:latest
 ```
 
@@ -276,8 +314,6 @@ See `docker-compose.yml` for a complete example pairing IDPlease with a Cloudfla
 
 ```bash
 docker compose up -d
-
-# Manage users
 docker compose exec idplease idplease user add bob
 docker compose exec idplease idplease role add bob Admin
 ```
@@ -289,7 +325,7 @@ docker compose exec idplease idplease role add bob Admin
 | File | Description |
 |------|-------------|
 | `idplease.json` | Server config (port, key file path, db path, admin key) |
-| `idplease.db` | SQLite database (users, roles, OIDC config) |
+| `idplease.db` | SQLite database (users, roles, clients, tokens, OIDC config) |
 | `idplease-key.json` | RSA signing key (auto-generated) |
 
 > ⚠️ **Backup `idplease-key.json`** if token continuity matters. Regenerating the key invalidates all previously issued tokens.
@@ -302,6 +338,9 @@ docker compose exec idplease idplease role add bob Admin
 git clone https://github.com/jclement/idplease.git
 cd idplease
 go build -o idplease .
+
+# With version info
+go build -ldflags "-X github.com/jclement/idplease/internal/config.Version=1.0.0" -o idplease .
 ```
 
 ### Running Tests

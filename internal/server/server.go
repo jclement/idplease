@@ -2,6 +2,7 @@ package server
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -37,20 +38,17 @@ func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store
 		}
 	}
 
-	srv := &Server{
-		cfg:      cfg,
-		provider: provider,
-		store:    s,
-		tmpl:     tmpl,
-		mux:      http.NewServeMux(),
-	}
-
+	srv := &Server{cfg: cfg, provider: provider, store: s, tmpl: tmpl, mux: http.NewServeMux()}
 	bp := cfg.NormalizedBasePath()
 
 	srv.mux.HandleFunc(bp+".well-known/openid-configuration", provider.DiscoveryHandler())
-	srv.mux.HandleFunc(bp+".well-known/openid-configuration/keys", provider.JWKSHandler())
+	srv.mux.HandleFunc(bp+".well-known/openid-configuration/keys", srv.corsWrap(provider.JWKSHandler()))
 	srv.mux.HandleFunc(bp+"authorize", srv.authorizeHandler)
-	srv.mux.HandleFunc(bp+"token", provider.TokenHandler())
+	srv.mux.HandleFunc(bp+"token", srv.corsWrap(provider.TokenHandler()))
+	srv.mux.HandleFunc(bp+"userinfo", srv.corsWrap(provider.UserInfoHandler()))
+	srv.mux.HandleFunc(bp+"revoke", srv.corsWrap(provider.RevokeHandler()))
+	srv.mux.HandleFunc(bp+"end-session", provider.EndSessionHandler())
+	srv.mux.HandleFunc(bp+"health", srv.healthHandler)
 
 	if bp != "/" {
 		srv.mux.HandleFunc("/.well-known/openid-configuration", provider.DiscoveryHandler())
@@ -67,42 +65,62 @@ func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store
 	return srv, nil
 }
 
+func (s *Server) corsWrap(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origins := s.cfg.GetCORSOrigins()
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			allowed := false
+			for _, o := range origins {
+				if o == "*" || o == origin {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
+				if len(origins) == 1 && origins[0] == "*" {
+					w.Header().Set("Access-Control-Allow-Origin", "*")
+				} else {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+				}
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				w.Header().Set("Access-Control-Max-Age", "86400")
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": config.Version})
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Assign request ID
 	reqID := r.Header.Get("X-Request-ID")
 	if reqID == "" {
 		reqID = uuid.New().String()[:8]
 	}
 	r.Header.Set("X-Request-ID", reqID)
 	w.Header().Set("X-Request-ID", reqID)
-
-	slog.Info("http request",
-		"request_id", reqID,
-		"method", r.Method,
-		"path", r.URL.Path,
-		"remote", r.RemoteAddr,
-		"user_agent", r.UserAgent(),
-	)
+	slog.Info("http request", "request_id", reqID, "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "user_agent", r.UserAgent())
 	s.mux.ServeHTTP(w, r)
 }
 
-func (s *Server) Handler() http.Handler {
-	return s
-}
+func (s *Server) Handler() http.Handler { return s }
 
 func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	reqID := r.Header.Get("X-Request-ID")
-
 	if r.Method == http.MethodGet {
-		slog.Info("login form displayed",
-			"request_id", reqID,
-			"client_id", r.URL.Query().Get("client_id"),
-			"redirect_uri", r.URL.Query().Get("redirect_uri"),
-		)
 		s.showLoginForm(w, r, "")
 		return
 	}
-
 	if r.Method == http.MethodPost {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "failed to parse form", http.StatusBadRequest)
@@ -111,49 +129,37 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		username := r.FormValue("username")
 		password := r.FormValue("password")
 
+		// Rate limiting
+		if limited, err := s.checkRateLimit(username, r.RemoteAddr); limited {
+			slog.Warn("rate limited", "username", username, "remote", r.RemoteAddr, "request_id", reqID, "reason", err)
+			s.showLoginForm(w, r, "Too many login attempts. Please try again later.")
+			return
+		}
+
+		// Record attempt
+		_ = s.store.RecordAttempt("user:" + username)
+		_ = s.store.RecordAttempt("ip:" + r.RemoteAddr)
+
 		user, err := s.store.Authenticate(username, password)
 		if err != nil {
-			slog.Warn("login failed",
-				"request_id", reqID,
-				"username", username,
-				"remote", r.RemoteAddr,
-				"user_agent", r.UserAgent(),
-				"reason", err.Error(),
-			)
+			slog.Warn("login failed", "request_id", reqID, "username", username, "remote", r.RemoteAddr, "user_agent", r.UserAgent(), "reason", err.Error())
 			s.showLoginForm(w, r, "Invalid username or password")
 			return
 		}
-
-		slog.Info("login succeeded",
-			"request_id", reqID,
-			"username", username,
-			"user_id", user.ID,
-			"remote", r.RemoteAddr,
-			"user_agent", r.UserAgent(),
-		)
+		slog.Info("login succeeded", "request_id", reqID, "username", username, "user_id", user.ID, "remote", r.RemoteAddr)
 
 		code, err := oidc.GenerateCode()
 		if err != nil {
-			slog.Error("failed to generate auth code", "error", err, "request_id", reqID)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-
 		redirectURI := r.FormValue("redirect_uri")
 		clientID := r.FormValue("client_id")
-
 		ac := &oidc.AuthCode{
-			Code:                code,
-			UserID:              user.ID,
-			Username:            user.Username,
-			Email:               user.Email,
-			DisplayName:         user.DisplayName,
-			Roles:               user.Roles,
-			RedirectURI:         redirectURI,
-			ClientID:            clientID,
-			CodeChallenge:       r.FormValue("code_challenge"),
-			CodeChallengeMethod: r.FormValue("code_challenge_method"),
-			Nonce:               r.FormValue("nonce"),
+			Code: code, UserID: user.ID, Username: user.Username, Email: user.Email,
+			DisplayName: user.DisplayName, Roles: user.Roles, RedirectURI: redirectURI,
+			ClientID: clientID, CodeChallenge: r.FormValue("code_challenge"),
+			CodeChallengeMethod: r.FormValue("code_challenge_method"), Nonce: r.FormValue("nonce"),
 		}
 		s.provider.StoreAuthCode(ac)
 
@@ -166,17 +172,26 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		if state != "" {
 			location += "&state=" + state
 		}
-
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
-
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) checkRateLimit(username, remoteAddr string) (bool, string) {
+	// 5 per minute per username
+	if count, err := s.store.CountAttempts("user:"+username, 1*60e9); err == nil && count >= 5 {
+		return true, "username rate limit exceeded"
+	}
+	// 20 per minute per IP
+	if count, err := s.store.CountAttempts("ip:"+remoteAddr, 1*60e9); err == nil && count >= 20 {
+		return true, "IP rate limit exceeded"
+	}
+	return false, ""
 }
 
 func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg string) {
 	bp := s.cfg.NormalizedBasePath()
-
 	hidden := make(map[string]string)
 	for key, values := range r.URL.Query() {
 		hidden[key] = values[0]
@@ -189,13 +204,7 @@ func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg st
 			}
 		}
 	}
-
-	data := map[string]interface{}{
-		"Error":        errMsg,
-		"Action":       bp + "authorize",
-		"HiddenFields": hidden,
-	}
-
+	data := map[string]interface{}{"Error": errMsg, "Action": bp + "authorize", "HiddenFields": hidden}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "login.html", data); err != nil {
 		slog.Error("template error", "error", err)

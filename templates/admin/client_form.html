@@ -1,0 +1,40 @@
+{{define "admin_client_form.html"}}
+{{template "admin_head" (map "Title" "Add Client" "BasePath" .BasePath)}}
+<h2 class="text-2xl font-bold text-gray-800 mb-6">Add Client</h2>
+{{if .Error}}<div class="mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{{.Error}}</div>{{end}}
+<form method="POST" action="{{.BasePath}}admin/clients/add" class="bg-white rounded-xl shadow p-6 space-y-5 max-w-lg">
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+        <input type="text" name="client_id" value="{{.ClientID}}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm">
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Client Name</label>
+        <input type="text" name="client_name" value="{{.ClientName}}" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none">
+    </div>
+    <div class="flex items-center gap-2">
+        <input type="checkbox" name="confidential" id="confidential" class="rounded">
+        <label for="confidential" class="text-sm text-gray-700">Confidential client (has a secret)</label>
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Client Secret (for confidential clients)</label>
+        <input type="text" name="client_secret" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm" placeholder="Leave empty for public clients">
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Redirect URIs (one per line, * for any)</label>
+        <textarea name="redirect_uris" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm">*</textarea>
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">Allowed Grant Types</label>
+        <div class="space-y-1">
+            <label class="flex items-center gap-2"><input type="checkbox" name="grant_types" value="authorization_code" checked class="rounded"><span class="text-sm">authorization_code</span></label>
+            <label class="flex items-center gap-2"><input type="checkbox" name="grant_types" value="refresh_token" checked class="rounded"><span class="text-sm">refresh_token</span></label>
+            <label class="flex items-center gap-2"><input type="checkbox" name="grant_types" value="client_credentials" class="rounded"><span class="text-sm">client_credentials</span></label>
+        </div>
+    </div>
+    <div class="flex gap-3">
+        <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-6 rounded-lg transition">Add Client</button>
+        <a href="{{.BasePath}}admin/clients" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-6 rounded-lg transition">Cancel</a>
+    </div>
+</form>
+{{template "admin_foot" .}}
+{{end}}

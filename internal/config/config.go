@@ -27,7 +27,11 @@ type Config struct {
 	SessionSecret        string            `json:"-"`
 	GroupMapping         map[string]string `json:"-"`
 	DisplayName          string            `json:"-"`
+	CORSOrigins          []string          `json:"-"`
 }
+
+// Version is set at build time
+var Version = "dev"
 
 // GetAccessTokenLifetime returns the access token lifetime in seconds
 func (c *Config) GetAccessTokenLifetime() int {
@@ -105,6 +109,7 @@ func Load(path string) (*Config, error) {
 		AccessTokenLifetime:  300,
 		RefreshTokenLifetime: 86400,
 		DisplayName:          "IDPlease",
+		CORSOrigins:          []string{"*"},
 	}
 
 	data, err := os.ReadFile(path)
@@ -237,6 +242,17 @@ func (c *Config) LoadFromStore(getConfig func(key string) (string, error), getSl
 	if v, err := getMap("group_mappings"); err == nil && len(v) > 0 {
 		c.GroupMapping = v
 	}
+	if v, err := getSlice("cors_origins"); err == nil && len(v) > 0 {
+		c.CORSOrigins = v
+	}
+}
+
+// GetCORSOrigins returns configured CORS origins
+func (c *Config) GetCORSOrigins() []string {
+	if len(c.CORSOrigins) == 0 {
+		return []string{"*"}
+	}
+	return c.CORSOrigins
 }
 
 func generateSecret() string {

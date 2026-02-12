@@ -54,6 +54,9 @@ func (a *Admin) setupRoutes() {
 	a.mux.HandleFunc(prefix+"/users/roles", a.requireAuth(a.userRolesHandler))
 	a.mux.HandleFunc(prefix+"/users/roles/add", a.requireAuth(a.roleAddHandler))
 	a.mux.HandleFunc(prefix+"/users/roles/remove", a.requireAuth(a.roleRemoveHandler))
+	a.mux.HandleFunc(prefix+"/clients", a.requireAuth(a.clientsHandler))
+	a.mux.HandleFunc(prefix+"/clients/add", a.requireAuth(a.clientAddHandler))
+	a.mux.HandleFunc(prefix+"/clients/delete", a.requireAuth(a.clientDeleteHandler))
 }
 
 func (a *Admin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -120,9 +123,11 @@ func (a *Admin) logoutHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	userCount, _ := a.store.UserCount()
+	clientCount, _ := a.store.ClientCount()
 	a.renderTemplate(w, "admin_dashboard.html", map[string]interface{}{
-		"BasePath":  a.cfg.NormalizedBasePath(),
-		"UserCount": userCount,
+		"BasePath":    a.cfg.NormalizedBasePath(),
+		"UserCount":   userCount,
+		"ClientCount": clientCount,
 		"Issuer":    a.cfg.Issuer,
 		"ClientIDs": a.cfg.GetClientIDs(),
 		"Flash":     getFlash(r),
@@ -492,4 +497,71 @@ func (a *Admin) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(prefix+"/users/roles", a.requireAuth(a.userRolesHandler))
 	mux.HandleFunc(prefix+"/users/roles/add", a.requireAuth(a.roleAddHandler))
 	mux.HandleFunc(prefix+"/users/roles/remove", a.requireAuth(a.roleRemoveHandler))
+	mux.HandleFunc(prefix+"/clients", a.requireAuth(a.clientsHandler))
+	mux.HandleFunc(prefix+"/clients/add", a.requireAuth(a.clientAddHandler))
+	mux.HandleFunc(prefix+"/clients/delete", a.requireAuth(a.clientDeleteHandler))
+}
+
+func (a *Admin) clientsHandler(w http.ResponseWriter, r *http.Request) {
+	clients := a.store.ListClients()
+	a.renderTemplate(w, "admin_clients.html", map[string]interface{}{
+		"BasePath": a.cfg.NormalizedBasePath(),
+		"Clients":  clients,
+		"Flash":    getFlash(r),
+	})
+}
+
+func (a *Admin) clientAddHandler(w http.ResponseWriter, r *http.Request) {
+	bp := a.cfg.NormalizedBasePath()
+	if r.Method == http.MethodGet {
+		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
+			"BasePath": bp,
+		})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	clientID := r.FormValue("client_id")
+	clientName := r.FormValue("client_name")
+	confidential := r.FormValue("confidential") == "on"
+	secret := r.FormValue("client_secret")
+	redirectURIs := splitLines(r.FormValue("redirect_uris"))
+	grantTypes := r.Form["grant_types"]
+	if len(grantTypes) == 0 {
+		grantTypes = []string{"authorization_code"}
+	}
+	if err := a.store.AddClient(clientID, clientName, secret, confidential, redirectURIs, grantTypes); err != nil {
+		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
+			"BasePath": bp, "Error": err.Error(),
+			"ClientID": clientID, "ClientName": clientName,
+		})
+		return
+	}
+	slog.Info("admin: client created", "client_id", clientID, "confidential", confidential, "remote", r.RemoteAddr)
+	http.Redirect(w, r, bp+"admin/clients?flash=Client+%22"+clientID+"%22+added&flash_type=success", http.StatusFound)
+}
+
+func (a *Admin) clientDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	bp := a.cfg.NormalizedBasePath()
+	clientID := r.FormValue("client_id")
+	if err := a.store.DeleteClient(clientID); err != nil {
+		http.Redirect(w, r, bp+"admin/clients?flash="+err.Error()+"&flash_type=error", http.StatusFound)
+		return
+	}
+	slog.Info("admin: client deleted", "client_id", clientID, "remote", r.RemoteAddr)
+	http.Redirect(w, r, bp+"admin/clients?flash=Client+%22"+clientID+"%22+deleted&flash_type=success", http.StatusFound)
 }

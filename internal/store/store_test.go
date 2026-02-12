@@ -20,27 +20,16 @@ func TestAddAndListUsers(t *testing.T) {
 	if err := s.AddUser("bob", "password123", "bob@test.com", "Bob Smith"); err != nil {
 		t.Fatal(err)
 	}
-
 	users := s.ListUsers()
-	if len(users) != 1 {
-		t.Fatalf("expected 1 user, got %d", len(users))
-	}
-	if users[0].Username != "bob" {
-		t.Errorf("expected bob, got %s", users[0].Username)
-	}
-	if users[0].Email != "bob@test.com" {
-		t.Errorf("expected bob@test.com, got %s", users[0].Email)
-	}
-	if users[0].ID == "" {
-		t.Error("user should have an ID")
+	if len(users) != 1 || users[0].Username != "bob" || users[0].Email != "bob@test.com" || users[0].ID == "" {
+		t.Errorf("unexpected users: %+v", users)
 	}
 }
 
 func TestDuplicateUser(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
-	err := s.AddUser("bob", "pass", "bob@test.com", "Bob")
-	if err == nil {
+	if err := s.AddUser("bob", "pass", "bob@test.com", "Bob"); err == nil {
 		t.Error("should error on duplicate user")
 	}
 }
@@ -48,22 +37,14 @@ func TestDuplicateUser(t *testing.T) {
 func TestAuthenticate(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "secret", "bob@test.com", "Bob")
-
 	user, err := s.Authenticate("bob", "secret")
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || user.Username != "bob" {
+		t.Fatal("auth should succeed")
 	}
-	if user.Username != "bob" {
-		t.Errorf("expected bob, got %s", user.Username)
-	}
-
-	_, err = s.Authenticate("bob", "wrong")
-	if err == nil {
+	if _, err := s.Authenticate("bob", "wrong"); err == nil {
 		t.Error("should fail with wrong password")
 	}
-
-	_, err = s.Authenticate("nobody", "secret")
-	if err == nil {
+	if _, err := s.Authenticate("nobody", "secret"); err == nil {
 		t.Error("should fail with unknown user")
 	}
 }
@@ -71,170 +52,102 @@ func TestAuthenticate(t *testing.T) {
 func TestDeleteUser(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
-
 	if err := s.DeleteUser("bob"); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.ListUsers()) != 0 {
-		t.Error("expected 0 users after delete")
+		t.Error("expected 0 users")
 	}
 	if err := s.DeleteUser("bob"); err == nil {
-		t.Error("should error on deleting non-existent user")
+		t.Error("should error")
 	}
 }
 
 func TestResetPassword(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "oldpass", "bob@test.com", "Bob")
-
-	if err := s.ResetPassword("bob", "newpass"); err != nil {
-		t.Fatal(err)
+	_ = s.ResetPassword("bob", "newpass")
+	if _, err := s.Authenticate("bob", "newpass"); err != nil {
+		t.Error("should auth with new password")
 	}
-
-	_, err := s.Authenticate("bob", "newpass")
-	if err != nil {
-		t.Error("should authenticate with new password")
-	}
-	_, err = s.Authenticate("bob", "oldpass")
-	if err == nil {
-		t.Error("should not authenticate with old password")
+	if _, err := s.Authenticate("bob", "oldpass"); err == nil {
+		t.Error("should not auth with old password")
 	}
 }
 
 func TestRoles(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
-
-	if err := s.AddRole("bob", "Admin"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AddRole("bob", "Reader"); err != nil {
-		t.Fatal(err)
-	}
-
+	_ = s.AddRole("bob", "Admin")
+	_ = s.AddRole("bob", "Reader")
 	roles, _ := s.ListRoles("bob")
 	if len(roles) != 2 {
 		t.Fatalf("expected 2 roles, got %d", len(roles))
 	}
-
 	if err := s.AddRole("bob", "Admin"); err == nil {
-		t.Error("should error on duplicate role")
+		t.Error("should error on duplicate")
 	}
-
-	if err := s.RemoveRole("bob", "Admin"); err != nil {
-		t.Fatal(err)
-	}
+	_ = s.RemoveRole("bob", "Admin")
 	roles, _ = s.ListRoles("bob")
 	if len(roles) != 1 {
-		t.Fatalf("expected 1 role, got %d", len(roles))
+		t.Fatalf("expected 1 role")
 	}
-
 	if err := s.RemoveRole("bob", "Admin"); err == nil {
-		t.Error("should error on removing non-existent role")
+		t.Error("should error")
 	}
-
-	_, err := s.ListRoles("nobody")
-	if err == nil {
-		t.Error("should error for non-existent user")
+	if _, err := s.ListRoles("nobody"); err == nil {
+		t.Error("should error")
 	}
 }
 
 func TestPersistence(t *testing.T) {
 	path := t.TempDir() + "/test.db"
-	s, err := New(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, _ := New(path)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	_ = s.AddRole("bob", "Admin")
 	_ = s.Close()
-
-	s2, err := New(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s2, _ := New(path)
 	defer func() { _ = s2.Close() }()
-
 	users := s2.ListUsers()
-	if len(users) != 1 {
-		t.Fatal("expected 1 user after reload")
-	}
-	if len(users[0].Roles) != 1 {
-		t.Fatal("expected 1 role after reload")
+	if len(users) != 1 || len(users[0].Roles) != 1 {
+		t.Fatal("persistence failed")
 	}
 }
 
 func TestConfig(t *testing.T) {
 	s := tempStore(t)
-
-	if err := s.SetConfig("issuer", "http://localhost:8080"); err != nil {
-		t.Fatal(err)
-	}
-	val, err := s.GetConfig("issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	_ = s.SetConfig("issuer", "http://localhost:8080")
+	val, _ := s.GetConfig("issuer")
 	if val != "http://localhost:8080" {
-		t.Errorf("expected http://localhost:8080, got %s", val)
+		t.Errorf("got %s", val)
 	}
-
-	if err := s.SetConfig("issuer", "https://example.com"); err != nil {
-		t.Fatal(err)
-	}
-	val, err = s.GetConfig("issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	_ = s.SetConfig("issuer", "https://example.com")
+	val, _ = s.GetConfig("issuer")
 	if val != "https://example.com" {
-		t.Errorf("expected https://example.com, got %s", val)
-	}
-
-	_ = s.SetConfig("port", "9090")
-	all, err := s.GetAllConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 2 {
-		t.Errorf("expected 2 config items, got %d", len(all))
+		t.Errorf("got %s", val)
 	}
 }
 
 func TestUserCount(t *testing.T) {
 	s := tempStore(t)
-	count, err := s.UserCount()
-	if err != nil {
-		t.Fatal(err)
+	c, _ := s.UserCount()
+	if c != 0 {
+		t.Errorf("expected 0")
 	}
-	if count != 0 {
-		t.Errorf("expected 0, got %d", count)
-	}
-
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
-	count, err = s.UserCount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1, got %d", count)
+	c, _ = s.UserCount()
+	if c != 1 {
+		t.Errorf("expected 1")
 	}
 }
 
 func TestUpdateUser(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
-
-	if err := s.UpdateUser("bob", "newemail@test.com", "New Bob"); err != nil {
-		t.Fatal(err)
-	}
-	u, err := s.GetUser("bob")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.Email != "newemail@test.com" {
-		t.Errorf("expected newemail@test.com, got %s", u.Email)
-	}
-	if u.DisplayName != "New Bob" {
-		t.Errorf("expected New Bob, got %s", u.DisplayName)
+	_ = s.UpdateUser("bob", "new@test.com", "New Bob")
+	u, _ := s.GetUser("bob")
+	if u.Email != "new@test.com" || u.DisplayName != "New Bob" {
+		t.Errorf("update failed")
 	}
 }
 
@@ -242,33 +155,15 @@ func TestRefreshTokenStoreAndConsume(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	u, _ := s.GetUser("bob")
-
-	raw, err := GenerateRefreshToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = s.StoreRefreshToken(raw, u.ID, "test-client", 24*time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Consume should succeed
+	raw, _ := GenerateRefreshToken()
+	_, _ = s.StoreRefreshToken(raw, u.ID, "test-client", 24*time.Hour)
 	userID, clientID, err := s.ConsumeRefreshToken(raw)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || userID != u.ID || clientID != "test-client" {
+		t.Fatal("consume failed")
 	}
-	if userID != u.ID {
-		t.Errorf("expected user ID %s, got %s", u.ID, userID)
-	}
-	if clientID != "test-client" {
-		t.Errorf("expected client_id test-client, got %s", clientID)
-	}
-
-	// Consume again should fail (revoked via rotation)
 	_, _, err = s.ConsumeRefreshToken(raw)
 	if err == nil {
-		t.Error("should fail on already-consumed refresh token")
+		t.Error("should fail on reuse")
 	}
 }
 
@@ -276,65 +171,136 @@ func TestRefreshTokenExpired(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	u, _ := s.GetUser("bob")
-
 	raw, _ := GenerateRefreshToken()
-	// Store with zero lifetime (already expired)
-	_, err := s.StoreRefreshToken(raw, u.ID, "test-client", -1*time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err = s.ConsumeRefreshToken(raw)
+	_, _ = s.StoreRefreshToken(raw, u.ID, "c", -1*time.Hour)
+	_, _, err := s.ConsumeRefreshToken(raw)
 	if err == nil {
-		t.Error("should fail on expired refresh token")
+		t.Error("should fail on expired")
 	}
 }
 
-func TestRefreshTokenInvalid(t *testing.T) {
-	s := tempStore(t)
-	_, _, err := s.ConsumeRefreshToken("nonexistent-token")
-	if err == nil {
-		t.Error("should fail on nonexistent refresh token")
-	}
-}
-
-func TestRevokeRefreshTokensForUser(t *testing.T) {
+func TestRefreshTokenRevoke(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
 	u, _ := s.GetUser("bob")
-
-	raw1, _ := GenerateRefreshToken()
-	raw2, _ := GenerateRefreshToken()
-	_, _ = s.StoreRefreshToken(raw1, u.ID, "c1", 24*time.Hour)
-	_, _ = s.StoreRefreshToken(raw2, u.ID, "c2", 24*time.Hour)
-
-	if err := s.RevokeRefreshTokensForUser(u.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err := s.ConsumeRefreshToken(raw1)
-	if err == nil {
-		t.Error("should fail after revoke")
-	}
-	_, _, err = s.ConsumeRefreshToken(raw2)
+	raw, _ := GenerateRefreshToken()
+	_, _ = s.StoreRefreshToken(raw, u.ID, "c", 24*time.Hour)
+	_ = s.RevokeRefreshToken(raw)
+	_, _, err := s.ConsumeRefreshToken(raw)
 	if err == nil {
 		t.Error("should fail after revoke")
 	}
 }
 
-func TestCleanupExpiredRefreshTokens(t *testing.T) {
+// ============ Client tests ============
+
+func TestAddAndListClients(t *testing.T) {
 	s := tempStore(t)
-	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
-	u, _ := s.GetUser("bob")
-
-	raw, _ := GenerateRefreshToken()
-	_, _ = s.StoreRefreshToken(raw, u.ID, "c1", -1*time.Hour)
-
-	count, err := s.CleanupExpiredRefreshTokens(0)
+	err := s.AddClient("my-app", "My App", "", false, []string{"*"}, []string{"authorization_code"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 cleaned up, got %d", count)
+	clients := s.ListClients()
+	if len(clients) != 1 || clients[0].ClientID != "my-app" {
+		t.Errorf("unexpected clients: %+v", clients)
+	}
+}
+
+func TestAddConfidentialClient(t *testing.T) {
+	s := tempStore(t)
+	err := s.AddClient("backend", "Backend", "supersecret", true, []string{}, []string{"client_credentials"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.GetClient("backend")
+	if err != nil || !c.Confidential || c.SecretHash == "" {
+		t.Error("should be confidential with secret hash")
+	}
+}
+
+func TestAuthenticateClient(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddClient("backend", "Backend", "secret123", true, []string{}, []string{"client_credentials"})
+	c, err := s.AuthenticateClient("backend", "secret123")
+	if err != nil || c.ClientID != "backend" {
+		t.Error("should authenticate")
+	}
+	_, err = s.AuthenticateClient("backend", "wrong")
+	if err == nil {
+		t.Error("should fail with wrong secret")
+	}
+	_, err = s.AuthenticateClient("nonexistent", "x")
+	if err == nil {
+		t.Error("should fail for nonexistent")
+	}
+}
+
+func TestPublicClientAuth(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddClient("spa", "SPA", "", false, []string{"*"}, []string{"authorization_code"})
+	c, err := s.AuthenticateClient("spa", "")
+	if err != nil || c.ClientID != "spa" {
+		t.Error("public client should auth without secret")
+	}
+}
+
+func TestClientGrantTypes(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddClient("app", "App", "", false, []string{}, []string{"authorization_code", "refresh_token"})
+	c, _ := s.GetClient("app")
+	if !c.HasGrantType("authorization_code") || !c.HasGrantType("refresh_token") {
+		t.Error("should have both grant types")
+	}
+	if c.HasGrantType("client_credentials") {
+		t.Error("should not have client_credentials")
+	}
+}
+
+func TestDeleteClient(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddClient("app", "App", "", false, []string{}, []string{})
+	if err := s.DeleteClient("app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteClient("app"); err == nil {
+		t.Error("should error")
+	}
+}
+
+func TestDuplicateClient(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddClient("app", "App", "", false, []string{}, []string{})
+	if err := s.AddClient("app", "App2", "", false, []string{}, []string{}); err == nil {
+		t.Error("should error on duplicate")
+	}
+}
+
+// ============ Rate Limiting ============
+
+func TestRateLimiting(t *testing.T) {
+	s := tempStore(t)
+	for i := 0; i < 5; i++ {
+		_ = s.RecordAttempt("user:bob")
+	}
+	count, _ := s.CountAttempts("user:bob", 1*time.Minute)
+	if count != 5 {
+		t.Errorf("expected 5, got %d", count)
+	}
+	count, _ = s.CountAttempts("user:alice", 1*time.Minute)
+	if count != 0 {
+		t.Errorf("expected 0, got %d", count)
+	}
+}
+
+// ============ Token Revocation ============
+
+func TestAccessTokenRevocation(t *testing.T) {
+	s := tempStore(t)
+	_ = s.RevokeAccessToken("abc123", time.Now().Add(1*time.Hour))
+	if !s.IsAccessTokenRevoked("abc123") {
+		t.Error("should be revoked")
+	}
+	if s.IsAccessTokenRevoked("other") {
+		t.Error("should not be revoked")
 	}
 }

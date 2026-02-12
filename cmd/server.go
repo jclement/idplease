@@ -22,6 +22,8 @@ func SetTemplates(t embed.FS) {
 }
 
 var adminKeyFlag string
+var adminUserFlag string
+var adminPasswordFlag string
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
@@ -56,6 +58,11 @@ var serverCmd = &cobra.Command{
 
 		// Load OIDC config from store (falls back to config file defaults)
 		cfg.LoadFromStore(s.GetConfig, s.GetConfigStringSlice, s.GetConfigMap)
+
+		// Bootstrap user if no users exist
+		if err := bootstrapUser(s); err != nil {
+			slog.Warn("bootstrap user failed", "error", err)
+		}
 
 		provider := oidc.NewProvider(cfg, keys, s)
 
@@ -99,7 +106,52 @@ var serverCmd = &cobra.Command{
 	},
 }
 
+func bootstrapUser(s *store.Store) error {
+	count, err := s.UserCount()
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil // users exist, skip bootstrap
+	}
+
+	username := os.Getenv("IDPLEASE_ADMIN_USER")
+	if username == "" {
+		username = "admin"
+	}
+	password := os.Getenv("IDPLEASE_ADMIN_PASSWORD")
+	generated := password == ""
+	if generated {
+		password = config.GenerateSecret()[:16]
+	}
+
+	if err := s.AddUser(username, password, "", "Administrator"); err != nil {
+		return err
+	}
+	if err := s.AddRole(username, "IDPlease.Admin"); err != nil {
+		return err
+	}
+
+	slog.Info("bootstrap user created", "username", username)
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════════════╗")
+	fmt.Println("║  First run detected! Admin user created:         ║")
+	fmt.Println("╠══════════════════════════════════════════════════╣")
+	fmt.Printf("║  Username: %-37s ║\n", username)
+	fmt.Printf("║  Password: %-37s ║\n", password)
+	fmt.Println("║  Role:     IDPlease.Admin                        ║")
+	if generated {
+		fmt.Println("║                                                  ║")
+		fmt.Println("║  ⚠  Change this password immediately!            ║")
+	}
+	fmt.Println("╚══════════════════════════════════════════════════╝")
+	fmt.Println()
+	return nil
+}
+
 func init() {
 	serverCmd.Flags().StringVar(&adminKeyFlag, "admin-key", "", "Admin key for the admin UI")
+	serverCmd.Flags().StringVar(&adminUserFlag, "admin-user", "", "Bootstrap admin username (first run only)")
+	serverCmd.Flags().StringVar(&adminPasswordFlag, "admin-password", "", "Bootstrap admin password (first run only)")
 	rootCmd.AddCommand(serverCmd)
 }
