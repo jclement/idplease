@@ -139,10 +139,7 @@ func (a *Admin) validateLoginCSRF(token string) bool {
 	}
 	ts := 0
 	_, _ = fmt.Sscanf(parts[1], "%d", &ts)
-	if time.Since(time.Unix(int64(ts), 0)) > 1*time.Hour {
-		return false
-	}
-	return true
+	return time.Since(time.Unix(int64(ts), 0)) <= 1*time.Hour
 }
 
 func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {

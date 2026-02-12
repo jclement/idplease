@@ -275,10 +275,7 @@ func (s *Server) validateLoginCSRF(token string) bool {
 	// Check timestamp (allow 1 hour)
 	ts := 0
 	_, _ = fmt.Sscanf(parts[1], "%d", &ts)
-	if time.Since(time.Unix(int64(ts), 0)) > 1*time.Hour {
-		return false
-	}
-	return true
+	return time.Since(time.Unix(int64(ts), 0)) <= 1*time.Hour
 }
 
 func (s *Server) showError(w http.ResponseWriter, msg string, status int) {
