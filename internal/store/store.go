@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +33,7 @@ type Client struct {
 	Confidential      bool     `json:"confidential"`
 	RedirectURIs      []string `json:"redirectURIs"`
 	AllowedGrantTypes []string `json:"allowedGrantTypes"`
+	AllowedOrigins    []string `json:"allowedOrigins"`
 	CreatedAt         string   `json:"createdAt"`
 }
 
@@ -103,6 +106,7 @@ func (s *Store) migrate() error {
 			secret_hash TEXT,
 			confidential INTEGER NOT NULL DEFAULT 0,
 			redirect_uris TEXT NOT NULL DEFAULT '[]',
+			cors_origins TEXT NOT NULL DEFAULT '[]',
 			allowed_grant_types TEXT NOT NULL DEFAULT '["authorization_code"]',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -116,9 +120,13 @@ func (s *Store) migrate() error {
 			revoked_at DATETIME NOT NULL,
 			expires_at DATETIME NOT NULL
 		)`,
+		`ALTER TABLE clients ADD COLUMN cors_origins TEXT NOT NULL DEFAULT '[]'`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name: cors_origins") {
+				continue
+			}
 			return fmt.Errorf("migration failed: %w", err)
 		}
 	}
@@ -338,6 +346,31 @@ func (s *Store) ListRoles(username string) ([]string, error) {
 	return s.getUserRoles(userID)
 }
 
+func (s *Store) ListAllRoles() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query("SELECT DISTINCT role FROM user_roles ORDER BY role")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var roles []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, err
+		}
+		roles = append(roles, role)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if roles == nil {
+		roles = []string{}
+	}
+	return roles, nil
+}
+
 func (s *Store) UserCount() (int, error) {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
@@ -346,7 +379,7 @@ func (s *Store) UserCount() (int, error) {
 
 // ============ Client methods ============
 
-func (s *Store) AddClient(clientID, clientName, secretPlain string, confidential bool, redirectURIs, grantTypes []string) error {
+func (s *Store) AddClient(clientID, clientName, secretPlain string, confidential bool, redirectURIs, origins, grantTypes []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var secretHash sql.NullString
@@ -363,11 +396,15 @@ func (s *Store) AddClient(clientID, clientName, secretPlain string, confidential
 	if grantTypes == nil {
 		grantTypes = []string{"authorization_code"}
 	}
+	if origins == nil {
+		origins = []string{}
+	}
 	ruJSON, _ := json.Marshal(redirectURIs)
+	originsJSON, _ := json.Marshal(origins)
 	gtJSON, _ := json.Marshal(grantTypes)
 	_, err := s.db.Exec(
-		"INSERT INTO clients (client_id, client_name, secret_hash, confidential, redirect_uris, allowed_grant_types) VALUES (?,?,?,?,?,?)",
-		clientID, clientName, secretHash, boolToInt(confidential), string(ruJSON), string(gtJSON),
+		"INSERT INTO clients (client_id, client_name, secret_hash, confidential, redirect_uris, cors_origins, allowed_grant_types) VALUES (?,?,?,?,?,?,?)",
+		clientID, clientName, secretHash, boolToInt(confidential), string(ruJSON), string(originsJSON), string(gtJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("client %q already exists", clientID)
@@ -385,9 +422,9 @@ func (s *Store) getClientUnlocked(clientID string) (*Client, error) {
 	var c Client
 	var secretHash sql.NullString
 	var confInt int
-	var ruJSON, gtJSON string
-	err := s.db.QueryRow("SELECT client_id, client_name, secret_hash, confidential, redirect_uris, allowed_grant_types, created_at FROM clients WHERE client_id = ?", clientID).Scan(
-		&c.ClientID, &c.ClientName, &secretHash, &confInt, &ruJSON, &gtJSON, &c.CreatedAt,
+	var ruJSON, originsJSON, gtJSON string
+	err := s.db.QueryRow("SELECT client_id, client_name, secret_hash, confidential, redirect_uris, cors_origins, allowed_grant_types, created_at FROM clients WHERE client_id = ?", clientID).Scan(
+		&c.ClientID, &c.ClientName, &secretHash, &confInt, &ruJSON, &originsJSON, &gtJSON, &c.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("client %q not found", clientID)
@@ -397,9 +434,13 @@ func (s *Store) getClientUnlocked(clientID string) (*Client, error) {
 		c.SecretHash = secretHash.String
 	}
 	_ = json.Unmarshal([]byte(ruJSON), &c.RedirectURIs)
+	_ = json.Unmarshal([]byte(originsJSON), &c.AllowedOrigins)
 	_ = json.Unmarshal([]byte(gtJSON), &c.AllowedGrantTypes)
 	if c.RedirectURIs == nil {
 		c.RedirectURIs = []string{}
+	}
+	if c.AllowedOrigins == nil {
+		c.AllowedOrigins = []string{}
 	}
 	if c.AllowedGrantTypes == nil {
 		c.AllowedGrantTypes = []string{}
@@ -410,7 +451,7 @@ func (s *Store) getClientUnlocked(clientID string) (*Client, error) {
 func (s *Store) ListClients() []Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.Query("SELECT client_id, client_name, secret_hash, confidential, redirect_uris, allowed_grant_types, created_at FROM clients ORDER BY client_id")
+	rows, err := s.db.Query("SELECT client_id, client_name, secret_hash, confidential, redirect_uris, cors_origins, allowed_grant_types, created_at FROM clients ORDER BY client_id")
 	if err != nil {
 		return nil
 	}
@@ -420,8 +461,8 @@ func (s *Store) ListClients() []Client {
 		var c Client
 		var secretHash sql.NullString
 		var confInt int
-		var ruJSON, gtJSON string
-		if err := rows.Scan(&c.ClientID, &c.ClientName, &secretHash, &confInt, &ruJSON, &gtJSON, &c.CreatedAt); err != nil {
+		var ruJSON, originsJSON, gtJSON string
+		if err := rows.Scan(&c.ClientID, &c.ClientName, &secretHash, &confInt, &ruJSON, &originsJSON, &gtJSON, &c.CreatedAt); err != nil {
 			continue
 		}
 		c.Confidential = confInt != 0
@@ -429,9 +470,13 @@ func (s *Store) ListClients() []Client {
 			c.SecretHash = secretHash.String
 		}
 		_ = json.Unmarshal([]byte(ruJSON), &c.RedirectURIs)
+		_ = json.Unmarshal([]byte(originsJSON), &c.AllowedOrigins)
 		_ = json.Unmarshal([]byte(gtJSON), &c.AllowedGrantTypes)
 		if c.RedirectURIs == nil {
 			c.RedirectURIs = []string{}
+		}
+		if c.AllowedOrigins == nil {
+			c.AllowedOrigins = []string{}
 		}
 		if c.AllowedGrantTypes == nil {
 			c.AllowedGrantTypes = []string{}
@@ -442,6 +487,31 @@ func (s *Store) ListClients() []Client {
 		clients = []Client{}
 	}
 	return clients
+}
+
+func (s *Store) ListClientOrigins() []string {
+	clients := s.ListClients()
+	if len(clients) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{})
+	var origins []string
+	for _, c := range clients {
+		for _, origin := range c.AllowedOrigins {
+			if origin == "" {
+				continue
+			}
+			if _, ok := seen[origin]; ok {
+				continue
+			}
+			seen[origin] = struct{}{}
+			origins = append(origins, origin)
+		}
+	}
+	if origins == nil {
+		return []string{}
+	}
+	return origins
 }
 
 func (s *Store) DeleteClient(clientID string) error {
@@ -458,13 +528,53 @@ func (s *Store) DeleteClient(clientID string) error {
 	return nil
 }
 
-func (s *Store) UpdateClient(clientID, clientName string, redirectURIs, grantTypes []string) error {
+func (s *Store) UpdateClient(clientID, clientName string, confidential bool, secretPlain string, redirectURIs, origins, grantTypes []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	var currentSecret sql.NullString
+	var currentConfidential int
+	err := s.db.QueryRow("SELECT secret_hash, confidential FROM clients WHERE client_id = ?", clientID).Scan(&currentSecret, &currentConfidential)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("client %q not found", clientID)
+		}
+		return err
+	}
+
+	var secretHash sql.NullString
+	if confidential {
+		if secretPlain != "" {
+			hashed, err := bcrypt.GenerateFromPassword([]byte(secretPlain), bcrypt.DefaultCost)
+			if err != nil {
+				return err
+			}
+			secretHash = sql.NullString{String: string(hashed), Valid: true}
+		} else if currentSecret.Valid {
+			secretHash = currentSecret
+		} else {
+			return fmt.Errorf("confidential clients require a secret")
+		}
+	}
+
+	if redirectURIs == nil {
+		redirectURIs = []string{}
+	}
+	if origins == nil {
+		origins = []string{}
+	}
+	if grantTypes == nil {
+		grantTypes = []string{}
+	}
+
 	ruJSON, _ := json.Marshal(redirectURIs)
+	originsJSON, _ := json.Marshal(origins)
 	gtJSON, _ := json.Marshal(grantTypes)
-	result, err := s.db.Exec("UPDATE clients SET client_name=?, redirect_uris=?, allowed_grant_types=? WHERE client_id=?",
-		clientName, string(ruJSON), string(gtJSON), clientID)
+
+	result, err := s.db.Exec(
+		"UPDATE clients SET client_name=?, confidential=?, secret_hash=?, redirect_uris=?, cors_origins=?, allowed_grant_types=? WHERE client_id=?",
+		clientName, boolToInt(confidential), secretHash, string(ruJSON), string(originsJSON), string(gtJSON), clientID,
+	)
 	if err != nil {
 		return err
 	}

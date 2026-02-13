@@ -19,6 +19,8 @@ const (
 type adminSession struct {
 	token     string
 	csrfToken string
+	userID    string
+	username  string
 	createdAt time.Time
 	expiresAt time.Time
 }
@@ -62,7 +64,7 @@ func (ss *sessionStore) cleanupLoop() {
 	}
 }
 
-func (ss *sessionStore) create() (*adminSession, error) {
+func (ss *sessionStore) create(userID, username string) (*adminSession, error) {
 	token, err := generateRandomHex(sessionTokenLen)
 	if err != nil {
 		return nil, err
@@ -75,6 +77,8 @@ func (ss *sessionStore) create() (*adminSession, error) {
 	s := &adminSession{
 		token:     token,
 		csrfToken: csrf,
+		userID:    userID,
+		username:  username,
 		createdAt: now,
 		expiresAt: now.Add(sessionLifetime),
 	}

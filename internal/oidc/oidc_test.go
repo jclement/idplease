@@ -27,8 +27,7 @@ func testProvider(t *testing.T) *Provider {
 	}
 	cfg := &config.Config{
 		Issuer: "http://localhost:8080", Port: 8080, BasePath: "/",
-		RedirectURIs: []string{"*"}, AccessTokenLifetime: 300, RefreshTokenLifetime: 86400,
-		ClientIDs: []string{"test-client"},
+		AccessTokenLifetime: 300, RefreshTokenLifetime: 86400,
 	}
 	km := &cryptopkg.KeyManager{KeyID: "test-key", PrivateKey: key}
 	s, err := store.New(":memory:")
@@ -36,6 +35,7 @@ func testProvider(t *testing.T) *Provider {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	_ = s.AddClient("test-client", "Test Client", "", false, []string{"*"}, []string{"https://app.local"}, []string{"authorization_code", "refresh_token"})
 	p := &Provider{cfg: cfg, keys: km, store: s, codes: make(map[string]*AuthCode), stop: make(chan struct{})}
 	t.Cleanup(func() { close(p.stop) })
 	return p
@@ -199,7 +199,7 @@ func TestRefreshTokenFlow(t *testing.T) {
 
 func TestClientCredentialsFlow(t *testing.T) {
 	p := testProvider(t)
-	_ = p.store.AddClient("backend-svc", "Backend", "mysecret", true, []string{}, []string{"client_credentials"})
+	_ = p.store.AddClient("backend-svc", "Backend", "mysecret", true, []string{}, []string{"https://api.local"}, []string{"client_credentials"})
 
 	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {"backend-svc"}, "client_secret": {"mysecret"}}
 	w := httptest.NewRecorder()
@@ -229,7 +229,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 
 func TestClientCredentialsBadSecret(t *testing.T) {
 	p := testProvider(t)
-	_ = p.store.AddClient("backend-svc", "Backend", "mysecret", true, []string{}, []string{"client_credentials"})
+	_ = p.store.AddClient("backend-svc", "Backend", "mysecret", true, []string{}, []string{"https://api.local"}, []string{"client_credentials"})
 	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {"backend-svc"}, "client_secret": {"wrong"}}
 	w := httptest.NewRecorder()
 	p.TokenHandler()(w, postForm("/token", form))
@@ -240,7 +240,7 @@ func TestClientCredentialsBadSecret(t *testing.T) {
 
 func TestClientCredentialsPublicClientRejected(t *testing.T) {
 	p := testProvider(t)
-	_ = p.store.AddClient("spa", "SPA", "", false, []string{}, []string{"authorization_code"})
+	_ = p.store.AddClient("spa", "SPA", "", false, []string{}, []string{"https://spa.local"}, []string{"authorization_code"})
 	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {"spa"}}
 	w := httptest.NewRecorder()
 	p.TokenHandler()(w, postForm("/token", form))
@@ -321,7 +321,7 @@ func TestRevokeEndpoint(t *testing.T) {
 
 func TestEndSessionEndpoint(t *testing.T) {
 	p := testProvider(t)
-	// H2: With wildcard redirect URIs in config, should allow redirect
+	// H2: With wildcard redirect URIs on the client, should allow redirect
 	req := httptest.NewRequest("GET", "/end-session?post_logout_redirect_uri=http://example.com", nil)
 	w := httptest.NewRecorder()
 	p.EndSessionHandler()(w, req)
@@ -336,7 +336,7 @@ func TestEndSessionEndpoint(t *testing.T) {
 func TestEndSessionInvalidRedirect(t *testing.T) {
 	p := testProvider(t)
 	// H2: With specific redirect URIs, should reject unknown URI
-	p.cfg.RedirectURIs = []string{"http://allowed.com/cb"}
+	_ = p.store.UpdateClient("test-client", "Test Client", false, "", []string{"http://allowed.com/cb"}, []string{}, []string{"authorization_code", "refresh_token"})
 	req := httptest.NewRequest("GET", "/end-session?post_logout_redirect_uri=http://evil.com", nil)
 	w := httptest.NewRecorder()
 	p.EndSessionHandler()(w, req)

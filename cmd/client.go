@@ -53,6 +53,10 @@ var clientAddCmd = &cobra.Command{
 		ruStr, _ := reader.ReadString('\n')
 		redirectURIs := splitCSV(strings.TrimSpace(ruStr))
 
+		fmt.Print("Allowed CORS Origins (comma-separated, leave blank for none): ")
+		originStr, _ := reader.ReadString('\n')
+		origins := splitCSV(strings.TrimSpace(originStr))
+
 		grantTypes := []string{"authorization_code", "refresh_token"}
 		if confidential {
 			fmt.Print("Allow client_credentials? (y/n): ")
@@ -62,7 +66,7 @@ var clientAddCmd = &cobra.Command{
 			}
 		}
 
-		if err := s.AddClient(clientID, name, secret, confidential, redirectURIs, grantTypes); err != nil {
+		if err := s.AddClient(clientID, name, secret, confidential, redirectURIs, origins, grantTypes); err != nil {
 			return err
 		}
 		fmt.Printf("Client %q added successfully\n", clientID)
@@ -90,11 +94,11 @@ var clientListCmd = &cobra.Command{
 			return nil
 		}
 		for _, c := range clients {
-			ctype := "public"
+			clientType := "public"
 			if c.Confidential {
-				ctype = "confidential"
+				clientType = "confidential"
 			}
-			fmt.Printf("%-25s %-20s %-15s %s\n", c.ClientID, c.ClientName, ctype, strings.Join(c.AllowedGrantTypes, ","))
+			fmt.Printf("%-25s %-20s %-15s %-30s %s\n", c.ClientID, c.ClientName, clientType, strings.Join(c.AllowedOrigins, ","), strings.Join(c.AllowedGrantTypes, ","))
 		}
 		return nil
 	},

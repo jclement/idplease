@@ -2,5 +2,7 @@
 {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
 <form method="POST" action="{{.BasePath}}admin/login">
 {{if .CSRFToken}}<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">{{end}}
-<input name="admin_key"><button>Sign In</button>
+<input name="username" {{with .Username}}value="{{.}}"{{end}}>
+<input name="password" type="password">
+<button>Sign In</button>
 </form></body></html>{{end}}

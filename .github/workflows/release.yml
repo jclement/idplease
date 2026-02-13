@@ -17,9 +17,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v2
         with:
-          go-version: '1.24'
+          version: latest
+          trust-config: true
+          cache: true
 
       - name: Login to GHCR
         uses: docker/login-action@v3

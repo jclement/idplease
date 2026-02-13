@@ -18,11 +18,14 @@
 services:
   idplease:
     image: ghcr.io/jclement/idplease:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: idplease
     restart: unless-stopped
     command: ["server", "--config", "/data/idplease.json"]
     volumes:
-      - idplease-data:/data
+      - ./data:/data
     expose:
       - "8080"
     environment:

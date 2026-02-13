@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,27 +19,33 @@ import (
 )
 
 type Admin struct {
-	cfg      *config.Config
-	store    *store.Store
-	tmpl     *template.Template
-	adminKey string
-	mux      *http.ServeMux
-	sessions *sessionStore
+	cfg         *config.Config
+	store       *store.Store
+	tmpl        *template.Template
+	loginSecret []byte
+	mux         *http.ServeMux
+	sessions    *sessionStore
 }
+
+const adminRole = "IDPlease.Admin"
 
 type flashData struct {
 	Type    string // "success" or "error"
 	Message string
 }
 
-func New(cfg *config.Config, s *store.Store, tmpl *template.Template, adminKey string) *Admin {
+func New(cfg *config.Config, s *store.Store, tmpl *template.Template) *Admin {
+	secret := cfg.SessionSecret
+	if secret == "" {
+		secret = config.GenerateSecret()
+	}
 	a := &Admin{
-		cfg:      cfg,
-		store:    s,
-		tmpl:     tmpl,
-		adminKey: adminKey,
-		mux:      http.NewServeMux(),
-		sessions: newSessionStore(),
+		cfg:         cfg,
+		store:       s,
+		tmpl:        tmpl,
+		loginSecret: []byte(secret),
+		mux:         http.NewServeMux(),
+		sessions:    newSessionStore(),
 	}
 	a.setupRoutes()
 	return a
@@ -68,6 +75,7 @@ func (a *Admin) setupRoutes() {
 	a.mux.HandleFunc(prefix+"/users/roles/remove", a.requireAuth(a.roleRemoveHandler))
 	a.mux.HandleFunc(prefix+"/clients", a.requireAuth(a.clientsHandler))
 	a.mux.HandleFunc(prefix+"/clients/add", a.requireAuth(a.clientAddHandler))
+	a.mux.HandleFunc(prefix+"/clients/edit", a.requireAuth(a.clientEditHandler))
 	a.mux.HandleFunc(prefix+"/clients/delete", a.requireAuth(a.clientDeleteHandler))
 }
 
@@ -96,6 +104,17 @@ func (a *Admin) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, bp+"admin/login", http.StatusFound)
 			return
 		}
+		user, err := a.store.GetUserByID(s.userID)
+		if err != nil || !userHasRole(user, adminRole) {
+			slog.Warn("admin session invalid", "path", r.URL.Path, "remote", r.RemoteAddr)
+			if err != nil {
+				slog.Debug("admin session user error", "error", err)
+			}
+			a.sessions.remove(s.token)
+			bp := a.cfg.NormalizedBasePath()
+			http.Redirect(w, r, bp+"admin/login", http.StatusFound)
+			return
+		}
 		// CSRF validation for POST requests
 		if r.Method == http.MethodPost {
 			if err := r.ParseForm(); err != nil {
@@ -119,7 +138,7 @@ func (a *Admin) generateLoginCSRF() string {
 	nonceHex := hex.EncodeToString(nonce)
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 	payload := nonceHex + ":" + ts
-	mac := hmac.New(sha256.New, []byte(a.adminKey))
+	mac := hmac.New(sha256.New, a.loginSecret)
 	_, _ = mac.Write([]byte(payload))
 	sig := hex.EncodeToString(mac.Sum(nil))
 	return payload + ":" + sig
@@ -131,7 +150,7 @@ func (a *Admin) validateLoginCSRF(token string) bool {
 		return false
 	}
 	payload := parts[0] + ":" + parts[1]
-	mac := hmac.New(sha256.New, []byte(a.adminKey))
+	mac := hmac.New(sha256.New, a.loginSecret)
 	_, _ = mac.Write([]byte(payload))
 	expected := hex.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(parts[2]), []byte(expected)) {
@@ -153,54 +172,90 @@ func (a *Admin) loginHandler(w http.ResponseWriter, r *http.Request) {
 		if !a.validateLoginCSRF(r.FormValue("csrf_token")) {
 			slog.Warn("admin login CSRF token invalid", "remote", r.RemoteAddr)
 			a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+				"Title":     "Login",
 				"Error":     "Invalid or expired form. Please try again.",
 				"BasePath":  a.cfg.NormalizedBasePath(),
 				"CSRFToken": a.generateLoginCSRF(),
+				"Username":  strings.TrimSpace(r.FormValue("username")),
 			})
 			return
 		}
 
-		// Rate limiting for admin login
-		rateLimitKey := "admin_ip:" + r.RemoteAddr
-		if count, err := a.store.CountAttempts(rateLimitKey, 1*60e9); err == nil && count >= 5 {
-			slog.Warn("admin login rate limited", "remote", r.RemoteAddr)
+		username := strings.TrimSpace(r.FormValue("username"))
+		password := r.FormValue("password")
+
+		if username == "" || password == "" {
 			a.renderTemplate(w, "admin_login.html", map[string]interface{}{
-				"Error":    "Too many login attempts. Please try again later.",
-				"BasePath": a.cfg.NormalizedBasePath(),
+				"Title":     "Login",
+				"Error":     "Username and password are required",
+				"BasePath":  a.cfg.NormalizedBasePath(),
+				"CSRFToken": a.generateLoginCSRF(),
+				"Username":  username,
 			})
 			return
 		}
 
-		// Record attempt before checking
-		_ = a.store.RecordAttempt(rateLimitKey)
-
-		key := r.FormValue("admin_key")
-		if constantTimeEqual(key, a.adminKey) {
-			slog.Info("admin login succeeded", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
-
-			sess, err := a.sessions.create()
-			if err != nil {
-				slog.Error("failed to create admin session", "error", err)
-				http.Error(w, "internal error", http.StatusInternalServerError)
+		rateKeys := []string{"admin_ip:" + r.RemoteAddr, "admin_user:" + strings.ToLower(username)}
+		for _, key := range rateKeys {
+			if count, err := a.store.CountAttempts(key, time.Minute); err == nil && count >= 5 {
+				slog.Warn("admin login rate limited", "remote", r.RemoteAddr, "username", username)
+				a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+					"Title":     "Login",
+					"Error":     "Too many login attempts. Please try again later.",
+					"BasePath":  a.cfg.NormalizedBasePath(),
+					"CSRFToken": a.generateLoginCSRF(),
+					"Username":  username,
+				})
 				return
 			}
+		}
 
-			secure := isSecureIssuer(a.cfg.Issuer)
-			http.SetCookie(w, adminCookie("idplease_admin", sess.token, "/", 0, secure))
+		for _, key := range rateKeys {
+			_ = a.store.RecordAttempt(key)
+		}
 
-			bp := a.cfg.NormalizedBasePath()
-			http.Redirect(w, r, bp+"admin", http.StatusFound)
+		user, err := a.store.Authenticate(username, password)
+		if err != nil {
+			slog.Warn("admin login failed", "username", username, "remote", r.RemoteAddr, "user_agent", r.UserAgent())
+			a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+				"Title":     "Login",
+				"Error":     "Invalid username or password",
+				"BasePath":  a.cfg.NormalizedBasePath(),
+				"CSRFToken": a.generateLoginCSRF(),
+				"Username":  username,
+			})
 			return
 		}
-		slog.Warn("admin login failed", "remote", r.RemoteAddr, "user_agent", r.UserAgent())
-		a.renderTemplate(w, "admin_login.html", map[string]interface{}{
-			"Error":     "Invalid admin key",
-			"BasePath":  a.cfg.NormalizedBasePath(),
-			"CSRFToken": a.generateLoginCSRF(),
-		})
+		if !userHasRole(user, adminRole) {
+			slog.Warn("admin login missing role", "username", username, "remote", r.RemoteAddr)
+			a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+				"Title":     "Login",
+				"Error":     "You do not have admin access",
+				"BasePath":  a.cfg.NormalizedBasePath(),
+				"CSRFToken": a.generateLoginCSRF(),
+				"Username":  username,
+			})
+			return
+		}
+
+		sess, err := a.sessions.create(user.ID, user.Username)
+		if err != nil {
+			slog.Error("failed to create admin session", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("admin login succeeded", "username", username, "remote", r.RemoteAddr, "user_agent", r.UserAgent())
+
+		secure := isSecureIssuer(a.cfg.Issuer)
+		http.SetCookie(w, adminCookie("idplease_admin", sess.token, "/", 0, secure))
+
+		bp := a.cfg.NormalizedBasePath()
+		http.Redirect(w, r, bp+"admin", http.StatusFound)
 		return
 	}
 	a.renderTemplate(w, "admin_login.html", map[string]interface{}{
+		"Title":     "Login",
 		"BasePath":  a.cfg.NormalizedBasePath(),
 		"CSRFToken": a.generateLoginCSRF(),
 	})
@@ -228,12 +283,13 @@ func (a *Admin) csrfToken(r *http.Request) string {
 func (a *Admin) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	userCount, _ := a.store.UserCount()
 	clientCount, _ := a.store.ClientCount()
+	clients := a.store.ListClients()
 	a.renderTemplate(w, "admin_dashboard.html", map[string]interface{}{
 		"BasePath":    a.cfg.NormalizedBasePath(),
 		"UserCount":   userCount,
 		"ClientCount": clientCount,
 		"Issuer":      a.cfg.Issuer,
-		"ClientIDs":   a.cfg.GetClientIDs(),
+		"Clients":     clients,
 		"Flash":       getFlash(r),
 		"CSRFToken":   a.csrfToken(r),
 	})
@@ -244,11 +300,9 @@ func (a *Admin) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"BasePath":             a.cfg.NormalizedBasePath(),
 		"DisplayName":          a.cfg.DisplayName,
 		"Issuer":               a.cfg.Issuer,
-		"ClientIDs":            strings.Join(a.cfg.GetClientIDs(), "\n"),
 		"TenantID":             a.cfg.TenantID,
 		"AccessTokenLifetime":  a.cfg.GetAccessTokenLifetime(),
 		"RefreshTokenLifetime": a.cfg.GetRefreshTokenLifetime(),
-		"RedirectURIs":         strings.Join(a.cfg.RedirectURIs, "\n"),
 		"GroupMappings":        formatGroupMappings(a.cfg.GroupMapping),
 		"SessionSecret":        a.cfg.SessionSecret,
 		"Flash":                getFlash(r),
@@ -286,15 +340,6 @@ func (a *Admin) settingsSaveHandler(w http.ResponseWriter, r *http.Request) {
 		if err := a.store.SetConfig(k, v); err != nil {
 			slog.Error("admin: failed to save config", "key", k, "error", err)
 		}
-	}
-
-	clientIDs := splitLines(r.FormValue("client_ids"))
-	if err := a.store.SetConfigStringSlice("client_ids", clientIDs); err != nil {
-		slog.Error("admin: failed to save client_ids", "error", err)
-	}
-	redirectURIs := splitLines(r.FormValue("redirect_uris"))
-	if err := a.store.SetConfigStringSlice("redirect_uris", redirectURIs); err != nil {
-		slog.Error("admin: failed to save redirect_uris", "error", err)
 	}
 
 	gm := parseGroupMappings(r.FormValue("group_mappings"))
@@ -470,11 +515,30 @@ func (a *Admin) userRolesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	existingRoles, err := a.store.ListAllRoles()
+	if err != nil {
+		slog.Warn("admin: list roles failed", "error", err)
+		existingRoles = []string{}
+	}
+	assigned := make(map[string]struct{}, len(user.Roles))
+	for _, role := range user.Roles {
+		assigned[role] = struct{}{}
+	}
+	suggestedRoles := make([]string, 0, len(existingRoles))
+	for _, role := range existingRoles {
+		if _, ok := assigned[role]; ok {
+			continue
+		}
+		suggestedRoles = append(suggestedRoles, role)
+	}
+
 	a.renderTemplate(w, "admin_roles.html", map[string]interface{}{
-		"BasePath":  bp,
-		"User":      user,
-		"Flash":     getFlash(r),
-		"CSRFToken": a.csrfToken(r),
+		"BasePath":       bp,
+		"User":           user,
+		"Flash":          getFlash(r),
+		"CSRFToken":      a.csrfToken(r),
+		"ExistingRoles":  existingRoles,
+		"SuggestedRoles": suggestedRoles,
 	})
 }
 
@@ -516,6 +580,14 @@ func (a *Admin) roleRemoveHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	if m, ok := data.(map[string]interface{}); ok {
+		if _, exists := m["SiteName"]; !exists {
+			m["SiteName"] = a.siteName()
+		}
+	}
 	if err := a.tmpl.ExecuteTemplate(w, name, data); err != nil {
 		slog.Error("template error", "template", name, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -534,6 +606,14 @@ func getFlash(r *http.Request) *flashData {
 	return &flashData{Type: fType, Message: msg}
 }
 
+func (a *Admin) siteName() string {
+	name := strings.TrimSpace(a.cfg.DisplayName)
+	if name == "" {
+		return "IDPlease"
+	}
+	return name
+}
+
 func splitLines(s string) []string {
 	var result []string
 	for _, line := range strings.Split(s, "\n") {
@@ -543,6 +623,14 @@ func splitLines(s string) []string {
 		}
 	}
 	return result
+}
+
+func selectedGrantTypes(grants []string) map[string]bool {
+	selected := make(map[string]bool, len(grants))
+	for _, grant := range grants {
+		selected[grant] = true
+	}
+	return selected
 }
 
 func formatGroupMappings(gm map[string]string) string {
@@ -571,6 +659,18 @@ func parseGroupMappings(s string) map[string]string {
 	return result
 }
 
+func userHasRole(user *store.User, role string) bool {
+	if user == nil {
+		return false
+	}
+	for _, r := range user.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Admin) RegisterRoutes(mux *http.ServeMux) {
 	bp := a.cfg.NormalizedBasePath()
 	prefix := bp + "admin"
@@ -590,6 +690,7 @@ func (a *Admin) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(prefix+"/users/roles/remove", a.requireAuth(a.roleRemoveHandler))
 	mux.HandleFunc(prefix+"/clients", a.requireAuth(a.clientsHandler))
 	mux.HandleFunc(prefix+"/clients/add", a.requireAuth(a.clientAddHandler))
+	mux.HandleFunc(prefix+"/clients/edit", a.requireAuth(a.clientEditHandler))
 	mux.HandleFunc(prefix+"/clients/delete", a.requireAuth(a.clientDeleteHandler))
 }
 
@@ -607,8 +708,19 @@ func (a *Admin) clientAddHandler(w http.ResponseWriter, r *http.Request) {
 	bp := a.cfg.NormalizedBasePath()
 	if r.Method == http.MethodGet {
 		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
-			"BasePath":  bp,
-			"CSRFToken": a.csrfToken(r),
+			"BasePath":        bp,
+			"Title":           "Add Client",
+			"Action":          bp + "admin/clients/add",
+			"SubmitLabel":     "Add Client",
+			"IsEdit":          false,
+			"ClientID":        "",
+			"ClientName":      "",
+			"Confidential":    false,
+			"ClientSecret":    "",
+			"RedirectURIs":    "*",
+			"CORSOrigins":     "",
+			"GrantSelections": selectedGrantTypes([]string{"authorization_code", "refresh_token"}),
+			"CSRFToken":       a.csrfToken(r),
 		})
 		return
 	}
@@ -622,20 +734,105 @@ func (a *Admin) clientAddHandler(w http.ResponseWriter, r *http.Request) {
 	confidential := r.FormValue("confidential") == "on"
 	secret := r.FormValue("client_secret")
 	redirectURIs := splitLines(r.FormValue("redirect_uris"))
+	origins := splitLines(r.FormValue("cors_origins"))
 	grantTypes := r.Form["grant_types"]
 	if len(grantTypes) == 0 {
 		grantTypes = []string{"authorization_code"}
 	}
-	if err := a.store.AddClient(clientID, clientName, secret, confidential, redirectURIs, grantTypes); err != nil {
+	if err := a.store.AddClient(clientID, clientName, secret, confidential, redirectURIs, origins, grantTypes); err != nil {
 		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
-			"BasePath": bp, "Error": err.Error(),
-			"ClientID": clientID, "ClientName": clientName,
-			"CSRFToken": a.csrfToken(r),
+			"BasePath":        bp,
+			"Title":           "Add Client",
+			"Action":          bp + "admin/clients/add",
+			"SubmitLabel":     "Add Client",
+			"IsEdit":          false,
+			"Error":           err.Error(),
+			"ClientID":        clientID,
+			"ClientName":      clientName,
+			"ClientSecret":    secret,
+			"Confidential":    confidential,
+			"RedirectURIs":    strings.Join(redirectURIs, "\n"),
+			"CORSOrigins":     strings.Join(origins, "\n"),
+			"GrantSelections": selectedGrantTypes(grantTypes),
+			"CSRFToken":       a.csrfToken(r),
 		})
 		return
 	}
 	slog.Info("admin: client created", "client_id", clientID, "confidential", confidential, "remote", r.RemoteAddr)
 	http.Redirect(w, r, bp+"admin/clients?flash=Client+%22"+clientID+"%22+added&flash_type=success", http.StatusFound)
+}
+
+func (a *Admin) clientEditHandler(w http.ResponseWriter, r *http.Request) {
+	bp := a.cfg.NormalizedBasePath()
+	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
+	if clientID == "" {
+		http.Redirect(w, r, bp+"admin/clients", http.StatusFound)
+		return
+	}
+
+	action := bp + "admin/clients/edit?client_id=" + url.QueryEscape(clientID)
+
+	if r.Method == http.MethodGet {
+		client, err := a.store.GetClient(clientID)
+		if err != nil {
+			http.Redirect(w, r, bp+"admin/clients?flash=Client+not+found&flash_type=error", http.StatusFound)
+			return
+		}
+		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
+			"BasePath":        bp,
+			"Title":           "Edit Client",
+			"Action":          action,
+			"SubmitLabel":     "Save Changes",
+			"IsEdit":          true,
+			"ClientID":        client.ClientID,
+			"ClientName":      client.ClientName,
+			"Confidential":    client.Confidential,
+			"ClientSecret":    "",
+			"RedirectURIs":    strings.Join(client.RedirectURIs, "\n"),
+			"CORSOrigins":     strings.Join(client.AllowedOrigins, "\n"),
+			"GrantSelections": selectedGrantTypes(client.AllowedGrantTypes),
+			"CSRFToken":       a.csrfToken(r),
+		})
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	clientName := strings.TrimSpace(r.FormValue("client_name"))
+	confidential := r.FormValue("confidential") == "on"
+	secret := strings.TrimSpace(r.FormValue("client_secret"))
+	redirectURIs := splitLines(r.FormValue("redirect_uris"))
+	origins := splitLines(r.FormValue("cors_origins"))
+	grantTypes := r.Form["grant_types"]
+	if len(grantTypes) == 0 {
+		grantTypes = []string{"authorization_code"}
+	}
+
+	if err := a.store.UpdateClient(clientID, clientName, confidential, secret, redirectURIs, origins, grantTypes); err != nil {
+		a.renderTemplate(w, "admin_client_form.html", map[string]interface{}{
+			"BasePath":        bp,
+			"Title":           "Edit Client",
+			"Action":          action,
+			"SubmitLabel":     "Save Changes",
+			"IsEdit":          true,
+			"Error":           err.Error(),
+			"ClientID":        clientID,
+			"ClientName":      clientName,
+			"ClientSecret":    "",
+			"Confidential":    confidential,
+			"RedirectURIs":    strings.Join(redirectURIs, "\n"),
+			"CORSOrigins":     strings.Join(origins, "\n"),
+			"GrantSelections": selectedGrantTypes(grantTypes),
+			"CSRFToken":       a.csrfToken(r),
+		})
+		return
+	}
+
+	slog.Info("admin: client updated", "client_id", clientID, "confidential", confidential, "remote", r.RemoteAddr)
+	http.Redirect(w, r, bp+"admin/clients?flash=Client+%22"+clientID+"%22+updated&flash_type=success", http.StatusFound)
 }
 
 func (a *Admin) clientDeleteHandler(w http.ResponseWriter, r *http.Request) {

@@ -21,7 +21,6 @@ func SetTemplates(t embed.FS) {
 	templates = t
 }
 
-var adminKeyFlag string
 var adminUserFlag string
 var adminPasswordFlag string
 
@@ -63,27 +62,11 @@ var serverCmd = &cobra.Command{
 		if err := bootstrapUser(s); err != nil {
 			slog.Warn("bootstrap user failed", "error", err)
 		}
+		bootstrapClients(cfg, s)
 
 		provider := oidc.NewProvider(cfg, keys, s)
 
-		// Determine admin key and its source
-		adminKey := adminKeyFlag
-		adminKeySource := "flag"
-		if adminKey == "" {
-			adminKey = os.Getenv("IDPLEASE_ADMIN_KEY")
-			adminKeySource = "env"
-		}
-		if adminKey == "" {
-			adminKey = cfg.AdminKey
-			adminKeySource = "config"
-		}
-		if adminKey == "" {
-			adminKey = config.GenerateSecret()[:16]
-			adminKeySource = "generated"
-			slog.Info("generated admin key (use --admin-key to set a persistent one)", "key", adminKey)
-		}
-
-		srv, err := server.NewWithAdminKey(cfg, provider, s, templates, adminKey)
+		srv, err := server.New(cfg, provider, s, templates)
 		if err != nil {
 			return fmt.Errorf("create server: %w", err)
 		}
@@ -95,10 +78,8 @@ var serverCmd = &cobra.Command{
 			"addr", addr,
 			"issuer", cfg.Issuer,
 			"base_path", cfg.NormalizedBasePath(),
-			"client_ids", cfg.GetClientIDs(),
 			"access_token_lifetime", cfg.GetAccessTokenLifetime(),
 			"refresh_token_lifetime", cfg.GetRefreshTokenLifetime(),
-			"admin_key_source", adminKeySource,
 			"admin_url", cfg.Issuer+cfg.NormalizedBasePath()+"admin",
 			"user_count", userCount,
 		)
@@ -149,8 +130,24 @@ func bootstrapUser(s *store.Store) error {
 	return nil
 }
 
+func bootstrapClients(cfg *config.Config, s *store.Store) {
+	if len(s.ListClients()) > 0 {
+		return
+	}
+	defaults := []string{"idplease"}
+	for _, cid := range defaults {
+		if _, err := s.GetClient(cid); err == nil {
+			continue
+		}
+		if err := s.AddClient(cid, cfg.DisplayName, "", false, []string{"*"}, []string{"*"}, []string{"authorization_code", "refresh_token"}); err != nil {
+			slog.Warn("bootstrap client failed", "client_id", cid, "error", err)
+			continue
+		}
+		slog.Info("bootstrap client created", "client_id", cid)
+	}
+}
+
 func init() {
-	serverCmd.Flags().StringVar(&adminKeyFlag, "admin-key", "", "Admin key for the admin UI")
 	serverCmd.Flags().StringVar(&adminUserFlag, "admin-user", "", "Bootstrap admin username (first run only)")
 	serverCmd.Flags().StringVar(&adminPasswordFlag, "admin-password", "", "Bootstrap admin password (first run only)")
 	rootCmd.AddCommand(serverCmd)

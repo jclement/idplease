@@ -4,13 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IDPlease Admin — {{.Title}}</title>
+    <title>{{.SiteName}} Admin{{if .Title}} — {{.Title}}{{end}}</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="min-h-screen bg-gray-50">
     <nav class="bg-indigo-600 text-white shadow-lg">
         <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-            <a href="{{.BasePath}}admin" class="text-xl font-bold">🪪 IDPlease Admin</a>
+            <a href="{{.BasePath}}admin" class="text-xl font-bold">🪪 {{.SiteName}} Admin</a>
             <div class="flex gap-4 items-center">
                 <a href="{{.BasePath}}admin" class="hover:text-indigo-200 transition">Dashboard</a>
                 <a href="{{.BasePath}}admin/settings" class="hover:text-indigo-200 transition">Settings</a>
@@ -33,7 +33,7 @@
 
 {{define "admin_foot"}}
     </main>
-    <footer class="text-center text-xs text-gray-400 py-4">IDPlease — Admin Panel</footer>
+    <footer class="text-center text-xs text-gray-400 py-4">{{.SiteName}} — Admin Panel</footer>
 </body>
 </html>
 {{end}}

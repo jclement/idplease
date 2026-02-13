@@ -68,7 +68,6 @@ docker run -p 8080:8080 -v $(pwd)/data:/data ghcr.io/jclement/idplease:latest
 On first start, IDPlease will:
 - Create an `idplease.db` SQLite database
 - Generate an RSA signing key (`idplease-key.json`)
-- Generate a one-time admin key and print it to the console
 - **Create a bootstrap `admin` user** with a random password (printed to stdout)
 
 Override bootstrap credentials with environment variables:
@@ -78,7 +77,7 @@ IDPLEASE_ADMIN_USER=myadmin IDPLEASE_ADMIN_PASSWORD=mypassword ./idplease server
 
 ### 3. Open the Admin UI
 
-Navigate to `http://localhost:8080/admin` and enter the admin key shown in the console output.
+Navigate to `http://localhost:8080/admin` and sign in with the bootstrap admin credentials printed to the console (or any user that has the `IDPlease.Admin` role).
 
 From the admin UI you can:
 - **Manage users** — add, edit, delete users; reset passwords
@@ -125,7 +124,9 @@ All endpoints are relative to the configured base path (default `/`).
 | `/revoke` | POST | Token revocation (RFC 7009) |
 | `/end-session` | GET | End session / logout |
 | `/health` | GET | Health check (`{"status":"ok","version":"..."}`) |
-| `/admin` | GET | Admin UI (requires admin key) |
+| `/admin` | GET | Admin UI (requires `IDPlease.Admin` role) |
+
+> Tip: When the base path is `/`, the discovery, authorize, token, userinfo, revoke, and end-session endpoints are also available under Azure-style prefixes (`/v2.0/` and `/oauth2/v2.0/`) for compatibility with Microsoft identity clients.
 
 ### Token Endpoint Grant Types
 
@@ -141,7 +142,7 @@ CORS headers are applied to `/token`, `/userinfo`, `/revoke`, and JWKS endpoints
 
 Login attempts are rate-limited:
 - **Per username:** 5 attempts per minute
-- **Per IP:** 20 attempts per minute
+- **Per IP:** 5 attempts per minute
 
 Exceeding the limit shows a "too many attempts" error on the login form.
 
@@ -151,19 +152,14 @@ Exceeding the limit shows a "too many attempts" error on the login form.
 
 IDPlease includes a built-in web admin interface at `{basePath}/admin`.
 
-### Admin Key
+### Admin Access
 
-The admin UI is protected by an admin key. You can set it in several ways (in order of priority):
-
-1. **CLI flag:** `./idplease server --admin-key=mysecret`
-2. **Environment variable:** `IDPLEASE_ADMIN_KEY=mysecret`
-3. **Config file:** `"adminKey": "mysecret"` in `idplease.json`
-4. **Auto-generated:** If none of the above are set, a random key is generated and printed to stdout on startup
+Any user with the `IDPlease.Admin` role can sign in to the admin UI using their normal username and password. On first run a bootstrap `admin` account is created with this role so you can log in immediately.
 
 ### Admin Pages
 
 - **Dashboard** — Overview: user count, client count, configured issuer
-- **Settings** — Edit: display name, issuer URL, client IDs, tenant ID, access/refresh token lifetimes, redirect URIs, CORS origins, group mappings, session secret
+- **Settings** — Edit: display name, issuer URL, tenant ID, access/refresh token lifetimes, redirect URIs, CORS origins, group mappings, session secret
 - **Users** — List, add, edit, delete users; reset passwords
 - **Roles** — Per-user role management: add/remove roles
 - **Clients** — List, add, delete OAuth clients (public or confidential)
@@ -178,7 +174,6 @@ All commands support `--config <path>` to specify an alternate config file (defa
 
 ```bash
 ./idplease server
-./idplease server --admin-key=mysecretkey
 ./idplease server --config /etc/idplease/config.json
 ```
 
@@ -228,7 +223,6 @@ IDPlease uses a JSON config file (`idplease.json`) for server-level settings and
 | `port` | `int` | `8080` | HTTP listen port |
 | `keyFile` | `string` | `idplease-key.json` | Path to the RSA signing key file |
 | `dbFile` | `string` | `idplease.db` | Path to the SQLite database |
-| `adminKey` | `string` | *(auto-generated)* | Admin key for the admin UI |
 
 ### OIDC Settings (in SQLite, managed via Admin UI or CLI)
 
@@ -237,7 +231,6 @@ IDPlease uses a JSON config file (`idplease.json`) for server-level settings and
 | `issuer` | The OIDC issuer URL |
 | `display_name` | Display name for the IDP |
 | `base_path` | Base path for all routes |
-| `client_ids` | Allowed OIDC client IDs (JSON array) |
 | `tenant_id` | Tenant ID for the `tid` claim |
 | `access_token_lifetime` | Access token lifetime in seconds (default: 300) |
 | `refresh_token_lifetime` | Refresh token lifetime in seconds (default: 86400) |
@@ -251,7 +244,6 @@ IDPlease uses a JSON config file (`idplease.json`) for server-level settings and
 ```json
 {
   "port": 8080,
-  "adminKey": "my-secret-admin-key",
   "dbFile": "/data/idplease.db",
   "keyFile": "/data/idplease-key.json"
 }
@@ -261,7 +253,6 @@ IDPlease uses a JSON config file (`idplease.json`) for server-level settings and
 
 | Variable | Description |
 |----------|-------------|
-| `IDPLEASE_ADMIN_KEY` | Admin key for the admin UI |
 | `IDPLEASE_ADMIN_USER` | Bootstrap admin username (default: `admin`) |
 | `IDPLEASE_ADMIN_PASSWORD` | Bootstrap admin password (default: random) |
 
@@ -324,7 +315,7 @@ docker compose exec idplease idplease role add bob Admin
 
 | File | Description |
 |------|-------------|
-| `idplease.json` | Server config (port, key file path, db path, admin key) |
+| `idplease.json` | Server config (port, key file path, db path) |
 | `idplease.db` | SQLite database (users, roles, clients, tokens, OIDC config) |
 | `idplease-key.json` | RSA signing key (auto-generated) |
 

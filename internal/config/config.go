@@ -10,16 +10,13 @@ import (
 
 type Config struct {
 	// Server-level settings (from JSON file)
-	Port     int    `json:"port"`
-	KeyFile  string `json:"keyFile"`
-	DBFile   string `json:"dbFile"`
-	AdminKey string `json:"adminKey"`
+	Port    int    `json:"port"`
+	KeyFile string `json:"keyFile"`
+	DBFile  string `json:"dbFile"`
 
 	// OIDC settings (from SQLite, with defaults)
 	Issuer               string            `json:"-"`
 	BasePath             string            `json:"-"`
-	RedirectURIs         []string          `json:"-"`
-	ClientIDs            []string          `json:"-"`
 	TenantID             string            `json:"-"`
 	TokenLifetime        int               `json:"-"` // Deprecated: use AccessTokenLifetime
 	AccessTokenLifetime  int               `json:"-"` // seconds, default 300 (5 min)
@@ -27,7 +24,6 @@ type Config struct {
 	SessionSecret        string            `json:"-"`
 	GroupMapping         map[string]string `json:"-"`
 	DisplayName          string            `json:"-"`
-	CORSOrigins          []string          `json:"-"`
 }
 
 // Version is set at build time
@@ -53,37 +49,6 @@ func (c *Config) GetRefreshTokenLifetime() int {
 	return 86400 // 24 hours default
 }
 
-func (c *Config) GetClientIDs() []string {
-	if len(c.ClientIDs) == 0 {
-		return []string{"idplease"}
-	}
-	return c.ClientIDs
-}
-
-func (c *Config) IsValidClientID(id string) bool {
-	for _, cid := range c.GetClientIDs() {
-		if cid == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Config) IsValidRedirectURI(uri string) bool {
-	if len(c.RedirectURIs) == 0 {
-		return true
-	}
-	for _, allowed := range c.RedirectURIs {
-		if allowed == "*" {
-			return true
-		}
-		if allowed == uri {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Config) NormalizedBasePath() string {
 	bp := c.BasePath
 	if bp == "" {
@@ -105,11 +70,9 @@ func Load(path string) (*Config, error) {
 		DBFile:               "idplease.db",
 		Issuer:               "http://localhost:8080",
 		BasePath:             "/",
-		RedirectURIs:         []string{"*"},
 		AccessTokenLifetime:  300,
 		RefreshTokenLifetime: 86400,
 		DisplayName:          "IDPlease",
-		CORSOrigins:          []string{"*"},
 	}
 
 	data, err := os.ReadFile(path)
@@ -136,9 +99,6 @@ func Load(path string) (*Config, error) {
 	if v, ok := raw["dbFile"]; ok {
 		_ = json.Unmarshal(v, &cfg.DBFile)
 	}
-	if v, ok := raw["adminKey"]; ok {
-		_ = json.Unmarshal(v, &cfg.AdminKey)
-	}
 
 	// Legacy/OIDC fields
 	if v, ok := raw["issuer"]; ok {
@@ -146,20 +106,6 @@ func Load(path string) (*Config, error) {
 	}
 	if v, ok := raw["basePath"]; ok {
 		_ = json.Unmarshal(v, &cfg.BasePath)
-	}
-	if v, ok := raw["redirectURIs"]; ok {
-		_ = json.Unmarshal(v, &cfg.RedirectURIs)
-	}
-	if v, ok := raw["clientID"]; ok {
-		var single string
-		if err := json.Unmarshal(v, &single); err == nil {
-			cfg.ClientIDs = []string{single}
-		} else {
-			var multi []string
-			if err := json.Unmarshal(v, &multi); err == nil {
-				cfg.ClientIDs = multi
-			}
-		}
 	}
 	if v, ok := raw["tenantID"]; ok {
 		_ = json.Unmarshal(v, &cfg.TenantID)
@@ -233,26 +179,9 @@ func (c *Config) LoadFromStore(getConfig func(key string) (string, error), getSl
 			c.RefreshTokenLifetime = tl
 		}
 	}
-	if v, err := getSlice("client_ids"); err == nil && len(v) > 0 {
-		c.ClientIDs = v
-	}
-	if v, err := getSlice("redirect_uris"); err == nil && len(v) > 0 {
-		c.RedirectURIs = v
-	}
 	if v, err := getMap("group_mappings"); err == nil && len(v) > 0 {
 		c.GroupMapping = v
 	}
-	if v, err := getSlice("cors_origins"); err == nil && len(v) > 0 {
-		c.CORSOrigins = v
-	}
-}
-
-// GetCORSOrigins returns configured CORS origins
-func (c *Config) GetCORSOrigins() []string {
-	if len(c.CORSOrigins) == 0 {
-		return []string{"*"}
-	}
-	return c.CORSOrigins
 }
 
 func generateSecret() string {

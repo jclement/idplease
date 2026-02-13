@@ -392,8 +392,7 @@ func (p *Provider) isValidPostLogoutRedirectURI(uri string) bool {
 			}
 		}
 	}
-	// Also check the global config redirect URIs
-	return p.cfg.IsValidRedirectURI(uri)
+	return false
 }
 
 // ============ Token signing ============
@@ -447,7 +446,11 @@ func (p *Provider) signClientToken(clientID, clientName string, lifetimeSec int)
 }
 
 func (p *Provider) GenerateToken(user *store.User) (string, error) {
-	return p.signUserToken(user.ID, user.Username, user.Email, user.DisplayName, user.Roles, p.cfg.GetClientIDs()[0], "", p.cfg.GetAccessTokenLifetime())
+	clientID := "idplease"
+	if clients := p.store.ListClients(); len(clients) > 0 {
+		clientID = clients[0].ClientID
+	}
+	return p.signUserToken(user.ID, user.Username, user.Email, user.DisplayName, user.Roles, clientID, "", p.cfg.GetAccessTokenLifetime())
 }
 
 // ============ Verification ============

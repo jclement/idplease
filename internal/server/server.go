@@ -31,10 +31,6 @@ type Server struct {
 }
 
 func New(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates embed.FS) (*Server, error) {
-	return NewWithAdminKey(cfg, provider, s, templates, "")
-}
-
-func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store, templates embed.FS, adminKey string) (*Server, error) {
 	tmpl, err := admin.ParseTemplates(templates)
 	if err != nil {
 		tmpl, err = admin.ParseTestTemplates(templates)
@@ -45,26 +41,36 @@ func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store
 
 	srv := &Server{cfg: cfg, provider: provider, store: s, tmpl: tmpl, mux: http.NewServeMux()}
 	bp := cfg.NormalizedBasePath()
+	basePaths := []string{bp}
+	if bp == "/" {
+		azureAliases := []string{"/v2.0/", "/oauth2/v2.0/"}
+		for _, alias := range azureAliases {
+			if alias == bp {
+				continue
+			}
+			basePaths = append(basePaths, alias)
+		}
+	}
 
-	srv.mux.HandleFunc(bp+".well-known/openid-configuration", provider.DiscoveryHandler())
-	srv.mux.HandleFunc(bp+".well-known/openid-configuration/keys", srv.corsWrap(provider.JWKSHandler()))
-	srv.mux.HandleFunc(bp+"authorize", srv.authorizeHandler)
-	srv.mux.HandleFunc(bp+"token", srv.corsWrap(provider.TokenHandler()))
-	srv.mux.HandleFunc(bp+"userinfo", srv.corsWrap(provider.UserInfoHandler()))
-	srv.mux.HandleFunc(bp+"revoke", srv.corsWrap(provider.RevokeHandler()))
-	srv.mux.HandleFunc(bp+"end-session", provider.EndSessionHandler())
-	srv.mux.HandleFunc(bp+"health", srv.healthHandler)
+	for _, prefix := range basePaths {
+		srv.mux.HandleFunc(prefix+".well-known/openid-configuration", srv.corsWrap(provider.DiscoveryHandler()))
+		srv.mux.HandleFunc(prefix+".well-known/openid-configuration/keys", srv.corsWrap(provider.JWKSHandler()))
+		srv.mux.HandleFunc(prefix+"authorize", srv.authorizeHandler)
+		srv.mux.HandleFunc(prefix+"token", srv.corsWrap(provider.TokenHandler()))
+		srv.mux.HandleFunc(prefix+"userinfo", srv.corsWrap(provider.UserInfoHandler()))
+		srv.mux.HandleFunc(prefix+"revoke", srv.corsWrap(provider.RevokeHandler()))
+		srv.mux.HandleFunc(prefix+"end-session", provider.EndSessionHandler())
+		srv.mux.HandleFunc(prefix+"health", srv.healthHandler)
+	}
 
 	if bp != "/" {
-		srv.mux.HandleFunc("/.well-known/openid-configuration", provider.DiscoveryHandler())
+		srv.mux.HandleFunc("/.well-known/openid-configuration", srv.corsWrap(provider.DiscoveryHandler()))
 	}
 
-	if adminKey != "" {
-		a := admin.New(cfg, s, tmpl, adminKey)
-		srv.admin = a
-		a.RegisterRoutes(srv.mux)
-		slog.Info("admin UI enabled", "path", bp+"admin")
-	}
+	a := admin.New(cfg, s, tmpl)
+	srv.admin = a
+	a.RegisterRoutes(srv.mux)
+	slog.Info("admin UI enabled", "path", bp+"admin")
 
 	slog.Info("routes registered", "basePath", bp)
 	return srv, nil
@@ -72,7 +78,7 @@ func NewWithAdminKey(cfg *config.Config, provider *oidc.Provider, s *store.Store
 
 func (s *Server) corsWrap(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		origins := s.cfg.GetCORSOrigins()
+		origins := s.store.ListClientOrigins()
 		origin := r.Header.Get("Origin")
 		if origin != "" {
 			allowed := false
@@ -136,9 +142,9 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.showError(w, "Missing client_id parameter", http.StatusBadRequest)
 		return
 	}
-	// Check client registry first, then fall back to config
-	client, clientErr := s.store.GetClient(clientID)
-	if clientErr != nil && !s.cfg.IsValidClientID(clientID) {
+	// Require the client to be registered in the store
+	client, err := s.store.GetClient(clientID)
+	if err != nil {
 		slog.Warn("authorize: invalid client_id", "client_id", clientID, "request_id", reqID)
 		s.showError(w, "Unknown client_id", http.StatusBadRequest)
 		return
@@ -153,14 +159,8 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.showError(w, "Missing redirect_uri parameter", http.StatusBadRequest)
 		return
 	}
-	// Validate against client's registered redirect URIs (if client in registry)
-	redirectValid := false
-	if client != nil {
-		redirectValid = client.IsValidRedirectURI(redirectURI)
-	} else {
-		// Fall back to global config
-		redirectValid = s.cfg.IsValidRedirectURI(redirectURI)
-	}
+	// Validate against client's registered redirect URIs
+	redirectValid := client.IsValidRedirectURI(redirectURI)
 	if !redirectValid {
 		slog.Warn("authorize: invalid redirect_uri", "redirect_uri", redirectURI, "client_id", clientID, "request_id", reqID)
 		s.showError(w, "Invalid redirect_uri for this client", http.StatusBadRequest)
@@ -220,8 +220,11 @@ func (s *Server) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.provider.StoreAuthCode(ac)
 
 		state := r.FormValue("state")
+		responseMode := r.FormValue("response_mode")
 		sep := "?"
-		if strings.Contains(redirectURI, "?") {
+		if responseMode == "fragment" {
+			sep = "#"
+		} else if strings.Contains(redirectURI, "?") {
 			sep = "&"
 		}
 		location := redirectURI + sep + "code=" + code
@@ -298,7 +301,11 @@ func (s *Server) showLoginForm(w http.ResponseWriter, r *http.Request, errMsg st
 			}
 		}
 	}
-	data := map[string]interface{}{"Error": errMsg, "Action": bp + "authorize", "HiddenFields": hidden, "CSRFToken": s.generateLoginCSRF()}
+	siteName := s.cfg.DisplayName
+	if siteName == "" {
+		siteName = "IDPlease"
+	}
+	data := map[string]interface{}{"Error": errMsg, "Action": bp + "authorize", "HiddenFields": hidden, "CSRFToken": s.generateLoginCSRF(), "SiteName": siteName}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "login.html", data); err != nil {
 		slog.Error("template error", "error", err)

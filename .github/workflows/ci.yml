@@ -12,9 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v2
         with:
-          go-version: '1.24'
+          version: latest
+          trust-config: true
+          cache: true
 
       - name: Build
         run: go build -v ./...
@@ -30,9 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v2
         with:
-          go-version: '1.24'
+          version: latest
+          trust-config: true
+          cache: true
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6

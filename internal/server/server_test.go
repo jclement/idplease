@@ -25,15 +25,15 @@ func testServer(t *testing.T) *Server {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	cfg := &config.Config{
 		Issuer: "http://localhost:8080", Port: 8080, BasePath: "/",
-		RedirectURIs: []string{"*"}, AccessTokenLifetime: 300, RefreshTokenLifetime: 86400,
-		ClientIDs: []string{"test-client"}, CORSOrigins: []string{"*"},
+		AccessTokenLifetime: 300, RefreshTokenLifetime: 86400,
 		SessionSecret: "test-secret-for-csrf",
 	}
 	km := &cryptopkg.KeyManager{KeyID: "test-key", PrivateKey: key}
 	s, _ := store.New(":memory:")
 	t.Cleanup(func() { _ = s.Close() })
+	_ = s.AddClient("test-client", "Test Client", "", false, []string{"*"}, []string{"*"}, []string{"authorization_code", "refresh_token"})
 	provider := oidc.NewProvider(cfg, km, s)
-	srv, err := NewWithAdminKey(cfg, provider, s, testTemplates, "test-admin-key")
+	srv, err := New(cfg, provider, s, testTemplates)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,12 +59,34 @@ func getLoginCSRF(t *testing.T, srv *Server, clientID, redirectURI string) strin
 	return body[start : start+end]
 }
 
+func getAdminCSRF(t *testing.T, srv *Server) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/admin/login", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for admin login form, got %d", w.Code)
+	}
+	body := w.Body.String()
+	idx := strings.Index(body, `name="csrf_token" value="`)
+	if idx == -1 {
+		t.Fatal("no csrf_token found in admin login form")
+	}
+	start := idx + len(`name="csrf_token" value="`)
+	end := strings.Index(body[start:], `"`)
+	return body[start : start+end]
+}
+
 func TestDiscoveryRoute(t *testing.T) {
 	srv := testServer(t)
+	req := httptest.NewRequest("GET", "/.well-known/openid-configuration", nil)
+	req.Header.Set("Origin", "https://example.com")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest("GET", "/.well-known/openid-configuration", nil))
+	srv.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatal("discovery should set CORS header")
 	}
 	var doc map[string]interface{}
 	_ = json.NewDecoder(w.Body).Decode(&doc)
@@ -114,6 +136,23 @@ func TestAuthorizeLoginFail(t *testing.T) {
 	}
 }
 
+func TestAzureAliasDiscovery(t *testing.T) {
+	srv := testServer(t)
+	aliases := []string{"/v2.0/.well-known/openid-configuration", "/oauth2/v2.0/.well-known/openid-configuration"}
+	for _, path := range aliases {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Origin", "https://example.com")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for alias %s, got %d", path, w.Code)
+		}
+		if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+			t.Fatalf("alias %s should set CORS header", path)
+		}
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	srv := testServer(t)
 	w := httptest.NewRecorder()
@@ -144,7 +183,9 @@ func TestCORSHeaders(t *testing.T) {
 
 func TestCORSSpecificOrigin(t *testing.T) {
 	srv := testServer(t)
-	srv.cfg.CORSOrigins = []string{"http://allowed.com"}
+	// Replace the wildcard client with one that has a specific origin
+	_ = srv.store.DeleteClient("test-client")
+	_ = srv.store.AddClient("test-client", "Test Client", "", false, []string{"*"}, []string{"http://allowed.com"}, []string{"authorization_code", "refresh_token"})
 	req := httptest.NewRequest("OPTIONS", "/token", nil)
 	req.Header.Set("Origin", "http://allowed.com")
 	w := httptest.NewRecorder()
@@ -202,8 +243,7 @@ func TestAuthorizeInvalidClientID(t *testing.T) {
 func TestAuthorizeInvalidRedirectURI(t *testing.T) {
 	srv := testServer(t)
 	// Register a client with specific redirect URIs
-	_ = srv.store.AddClient("strict-client", "Strict", "", false, []string{"http://allowed.com/cb"}, []string{"authorization_code"})
-	srv.cfg.ClientIDs = append(srv.cfg.ClientIDs, "strict-client")
+	_ = srv.store.AddClient("strict-client", "Strict", "", false, []string{"http://allowed.com/cb"}, []string{"https://app.local"}, []string{"authorization_code"})
 
 	// C2: Invalid redirect_uri should show error page, not redirect
 	w := httptest.NewRecorder()
@@ -215,7 +255,7 @@ func TestAuthorizeInvalidRedirectURI(t *testing.T) {
 
 func TestAuthorizeValidRedirectURI(t *testing.T) {
 	srv := testServer(t)
-	_ = srv.store.AddClient("strict-client", "Strict", "", false, []string{"http://allowed.com/cb"}, []string{"authorization_code"})
+	_ = srv.store.AddClient("strict-client", "Strict", "", false, []string{"http://allowed.com/cb"}, []string{"https://app.local"}, []string{"authorization_code"})
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, httptest.NewRequest("GET", "/authorize?client_id=strict-client&redirect_uri=http://allowed.com/cb", nil))
@@ -226,7 +266,7 @@ func TestAuthorizeValidRedirectURI(t *testing.T) {
 
 func TestAuthorizeWildcardRedirectURI(t *testing.T) {
 	srv := testServer(t)
-	_ = srv.store.AddClient("wild-client", "Wild", "", false, []string{"*"}, []string{"authorization_code"})
+	_ = srv.store.AddClient("wild-client", "Wild", "", false, []string{"*"}, []string{"https://wild.local"}, []string{"authorization_code"})
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, httptest.NewRequest("GET", "/authorize?client_id=wild-client&redirect_uri=http://anything.com/cb", nil))
@@ -270,29 +310,35 @@ func TestCSRFTokenRequired(t *testing.T) {
 
 func TestAdminLoginRateLimiting(t *testing.T) {
 	srv := testServer(t)
+	_ = srv.store.AddUser("admin", "password", "", "Administrator")
+	_ = srv.store.AddRole("admin", "IDPlease.Admin")
 	// H4: Exhaust admin login rate limit
 	for i := 0; i < 6; i++ {
-		form := url.Values{"admin_key": {"wrong"}, "csrf_token": {"invalid"}}
+		csrf := getAdminCSRF(t, srv)
+		form := url.Values{"username": {"admin"}, "password": {"wrong"}, "csrf_token": {csrf}}
 		req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, req)
 	}
 	// Should be rate limited now
-	form := url.Values{"admin_key": {"test-admin-key"}, "csrf_token": {"invalid"}}
+	csrf := getAdminCSRF(t, srv)
+	form := url.Values{"username": {"admin"}, "password": {"password"}, "csrf_token": {csrf}}
 	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	body := w.Body.String()
-	if strings.Contains(body, "Invalid admin key") {
-		t.Error("should show rate limit message, not invalid key")
+	if !strings.Contains(body, "Too many login attempts") {
+		t.Error("should show rate limit message")
 	}
 }
 
 func TestAdminSessionNotRawKey(t *testing.T) {
 	srv := testServer(t)
-	// C1: After admin login, cookie should NOT contain the raw admin key
+	_ = srv.store.AddUser("admin", "password", "", "Administrator")
+	_ = srv.store.AddRole("admin", "IDPlease.Admin")
+	// C1: After admin login, cookie should NOT contain raw credentials
 	// First get CSRF token from login page
 	w1 := httptest.NewRecorder()
 	srv.ServeHTTP(w1, httptest.NewRequest("GET", "/admin/login", nil))
@@ -305,7 +351,7 @@ func TestAdminSessionNotRawKey(t *testing.T) {
 	end := strings.Index(body[start:], `"`)
 	csrf := body[start : start+end]
 
-	form := url.Values{"admin_key": {"test-admin-key"}, "csrf_token": {csrf}}
+	form := url.Values{"username": {"admin"}, "password": {"password"}, "csrf_token": {csrf}}
 	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -316,8 +362,8 @@ func TestAdminSessionNotRawKey(t *testing.T) {
 	cookies := w.Result().Cookies()
 	for _, c := range cookies {
 		if c.Name == "idplease_admin" {
-			if c.Value == "test-admin-key" {
-				t.Error("C1: cookie should NOT contain the raw admin key")
+			if c.Value == "password" {
+				t.Error("C1: cookie should NOT contain raw credentials")
 			}
 			if !c.HttpOnly {
 				t.Error("H3: cookie should be HttpOnly")
@@ -331,6 +377,8 @@ func TestAdminSessionNotRawKey(t *testing.T) {
 
 func TestAdminCookieSecureFlag(t *testing.T) {
 	srv := testServer(t)
+	_ = srv.store.AddUser("admin", "password", "", "Administrator")
+	_ = srv.store.AddRole("admin", "IDPlease.Admin")
 	// H3: With https issuer, cookie should have Secure flag
 	srv.cfg.Issuer = "https://example.com"
 
@@ -345,7 +393,7 @@ func TestAdminCookieSecureFlag(t *testing.T) {
 	end := strings.Index(body[start:], `"`)
 	csrf := body[start : start+end]
 
-	form := url.Values{"admin_key": {"test-admin-key"}, "csrf_token": {csrf}}
+	form := url.Values{"username": {"admin"}, "password": {"password"}, "csrf_token": {csrf}}
 	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()

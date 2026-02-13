@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IDPlease 🪪 — Sign In</title>
+    <title>{{if .SiteName}}{{.SiteName}}{{else}}IDPlease{{end}} 🪪 — Sign In</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="min-h-screen bg-gradient-to-br from-indigo-100 via-white to-purple-100 flex items-center justify-center p-4">
     <div class="w-full max-w-md">
         <div class="bg-white rounded-2xl shadow-xl p-8">
             <div class="text-center mb-8">
-                <h1 class="text-3xl font-bold text-gray-800">IDPlease 🪪</h1>
+                <h1 class="text-3xl font-bold text-gray-800">{{if .SiteName}}{{.SiteName}}{{else}}IDPlease{{end}} 🪪</h1>
                 <p class="text-gray-500 mt-2">Sign in to continue</p>
             </div>
 
@@ -46,7 +46,7 @@
                 </button>
             </form>
         </div>
-        <p class="text-center text-xs text-gray-400 mt-6">IDPlease — Development Identity Provider</p>
+        <p class="text-center text-xs text-gray-400 mt-6">{{if .SiteName}}{{.SiteName}}{{else}}IDPlease{{end}} — Development Identity Provider</p>
     </div>
 </body>
 </html>

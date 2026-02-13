@@ -16,10 +16,19 @@
         <div class="text-lg font-mono text-gray-800 mt-2 break-all">{{.Issuer}}</div>
     </div>
     <div class="bg-white rounded-xl shadow p-6">
-        <div class="text-sm text-gray-500 uppercase tracking-wide">Client IDs</div>
+        <div class="text-sm text-gray-500 uppercase tracking-wide">Sample Clients</div>
         <div class="mt-2">
-            {{range .ClientIDs}}
-            <span class="inline-block bg-indigo-100 text-indigo-700 text-sm px-2 py-1 rounded mr-1 mb-1">{{.}}</span>
+            {{if .Clients}}
+                {{range $i, $client := .Clients}}
+                    {{if lt $i 5}}
+                        <span class="inline-block bg-indigo-100 text-indigo-700 text-sm px-2 py-1 rounded mr-1 mb-1">{{$client.ClientID}}</span>
+                    {{end}}
+                {{end}}
+                {{if gt (len .Clients) 5}}
+                    <span class="inline-block bg-gray-200 text-gray-600 text-xs px-2 py-1 rounded">and more…</span>
+                {{end}}
+            {{else}}
+                <span class="text-sm text-gray-400">No clients yet. Add one from the Clients page.</span>
             {{end}}
         </div>
     </div>

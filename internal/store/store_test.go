@@ -100,6 +100,28 @@ func TestRoles(t *testing.T) {
 	}
 }
 
+func TestListAllRoles(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddUser("bob", "pass", "bob@test.com", "Bob")
+	_ = s.AddUser("alice", "pass", "alice@test.com", "Alice")
+	_ = s.AddRole("bob", "Admin")
+	_ = s.AddRole("bob", "Reader")
+	_ = s.AddRole("alice", "Editor")
+	roles, err := s.ListAllRoles()
+	if err != nil {
+		t.Fatalf("list roles failed: %v", err)
+	}
+	if len(roles) != 3 {
+		t.Fatalf("expected 3 roles, got %d (%v)", len(roles), roles)
+	}
+	expected := []string{"Admin", "Editor", "Reader"}
+	for i, role := range expected {
+		if roles[i] != role {
+			t.Fatalf("expected role %q at %d, got %q", role, i, roles[i])
+		}
+	}
+}
+
 func TestPersistence(t *testing.T) {
 	path := t.TempDir() + "/test.db"
 	s, _ := New(path)
@@ -196,7 +218,7 @@ func TestRefreshTokenRevoke(t *testing.T) {
 
 func TestAddAndListClients(t *testing.T) {
 	s := tempStore(t)
-	err := s.AddClient("my-app", "My App", "", false, []string{"*"}, []string{"authorization_code"})
+	err := s.AddClient("my-app", "My App", "", false, []string{"*"}, []string{}, []string{"authorization_code"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +230,7 @@ func TestAddAndListClients(t *testing.T) {
 
 func TestAddConfidentialClient(t *testing.T) {
 	s := tempStore(t)
-	err := s.AddClient("backend", "Backend", "supersecret", true, []string{}, []string{"client_credentials"})
+	err := s.AddClient("backend", "Backend", "supersecret", true, []string{}, []string{"https://api.internal"}, []string{"client_credentials"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +242,7 @@ func TestAddConfidentialClient(t *testing.T) {
 
 func TestAuthenticateClient(t *testing.T) {
 	s := tempStore(t)
-	_ = s.AddClient("backend", "Backend", "secret123", true, []string{}, []string{"client_credentials"})
+	_ = s.AddClient("backend", "Backend", "secret123", true, []string{}, []string{}, []string{"client_credentials"})
 	c, err := s.AuthenticateClient("backend", "secret123")
 	if err != nil || c.ClientID != "backend" {
 		t.Error("should authenticate")
@@ -237,7 +259,7 @@ func TestAuthenticateClient(t *testing.T) {
 
 func TestPublicClientAuth(t *testing.T) {
 	s := tempStore(t)
-	_ = s.AddClient("spa", "SPA", "", false, []string{"*"}, []string{"authorization_code"})
+	_ = s.AddClient("spa", "SPA", "", false, []string{"*"}, []string{"https://app.test"}, []string{"authorization_code"})
 	c, err := s.AuthenticateClient("spa", "")
 	if err != nil || c.ClientID != "spa" {
 		t.Error("public client should auth without secret")
@@ -246,7 +268,7 @@ func TestPublicClientAuth(t *testing.T) {
 
 func TestClientGrantTypes(t *testing.T) {
 	s := tempStore(t)
-	_ = s.AddClient("app", "App", "", false, []string{}, []string{"authorization_code", "refresh_token"})
+	_ = s.AddClient("app", "App", "", false, []string{}, []string{"https://app.test"}, []string{"authorization_code", "refresh_token"})
 	c, _ := s.GetClient("app")
 	if !c.HasGrantType("authorization_code") || !c.HasGrantType("refresh_token") {
 		t.Error("should have both grant types")
@@ -258,7 +280,7 @@ func TestClientGrantTypes(t *testing.T) {
 
 func TestDeleteClient(t *testing.T) {
 	s := tempStore(t)
-	_ = s.AddClient("app", "App", "", false, []string{}, []string{})
+	_ = s.AddClient("app", "App", "", false, []string{}, []string{}, []string{})
 	if err := s.DeleteClient("app"); err != nil {
 		t.Fatal(err)
 	}
@@ -269,9 +291,45 @@ func TestDeleteClient(t *testing.T) {
 
 func TestDuplicateClient(t *testing.T) {
 	s := tempStore(t)
-	_ = s.AddClient("app", "App", "", false, []string{}, []string{})
-	if err := s.AddClient("app", "App2", "", false, []string{}, []string{}); err == nil {
+	_ = s.AddClient("app", "App", "", false, []string{}, []string{}, []string{})
+	if err := s.AddClient("app", "App2", "", false, []string{}, []string{}, []string{}); err == nil {
 		t.Error("should error on duplicate")
+	}
+}
+
+func TestUpdateClient(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AddClient("app", "App", "", false, []string{"*"}, []string{}, []string{"authorization_code"})
+
+	if err := s.UpdateClient("app", "App Updated", false, "", []string{"http://localhost/cb"}, []string{"https://app.test"}, []string{"authorization_code", "refresh_token"}); err != nil {
+		t.Fatalf("update client failed: %v", err)
+	}
+	c, err := s.GetClient("app")
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	if c.ClientName != "App Updated" {
+		t.Errorf("expected name to update, got %s", c.ClientName)
+	}
+	if len(c.RedirectURIs) != 1 || c.RedirectURIs[0] != "http://localhost/cb" {
+		t.Errorf("redirect URIs not updated: %+v", c.RedirectURIs)
+	}
+	if len(c.AllowedOrigins) != 1 || c.AllowedOrigins[0] != "https://app.test" {
+		t.Errorf("origins not updated: %+v", c.AllowedOrigins)
+	}
+	if !c.HasGrantType("refresh_token") {
+		t.Error("refresh_token grant should be present")
+	}
+
+	if err := s.UpdateClient("app", "App Updated", true, "", c.RedirectURIs, c.AllowedOrigins, c.AllowedGrantTypes); err == nil {
+		t.Error("expected error when setting confidential without secret")
+	}
+
+	if err := s.UpdateClient("app", "App Updated", true, "supersecret", c.RedirectURIs, c.AllowedOrigins, c.AllowedGrantTypes); err != nil {
+		t.Fatalf("update to confidential failed: %v", err)
+	}
+	if _, err := s.AuthenticateClient("app", "supersecret"); err != nil {
+		t.Errorf("expected new secret to authenticate: %v", err)
 	}
 }
 

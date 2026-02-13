@@ -35,7 +35,6 @@ func TestLoadFromFile(t *testing.T) {
 		"issuer":               "https://example.com",
 		"port":                 9090,
 		"basePath":             "/idp",
-		"clientID":             "my-client",
 		"tenantID":             "tenant-123",
 		"accessTokenLifetime":  600,
 		"refreshTokenLifetime": 172800,
@@ -78,48 +77,6 @@ func TestLegacyTokenLifetimeFallback(t *testing.T) {
 	}
 }
 
-func TestClientIDSingle(t *testing.T) {
-	cfg := &Config{ClientIDs: []string{"my-app"}}
-	ids := cfg.GetClientIDs()
-	if len(ids) != 1 || ids[0] != "my-app" {
-		t.Errorf("unexpected client IDs: %v", ids)
-	}
-	if !cfg.IsValidClientID("my-app") {
-		t.Error("should be valid")
-	}
-	if cfg.IsValidClientID("other") {
-		t.Error("should be invalid")
-	}
-}
-
-func TestClientIDArray(t *testing.T) {
-	cfg := &Config{ClientIDs: []string{"app1", "app2"}}
-	ids := cfg.GetClientIDs()
-	if len(ids) != 2 {
-		t.Errorf("expected 2 client IDs, got %d", len(ids))
-	}
-	if !cfg.IsValidClientID("app1") || !cfg.IsValidClientID("app2") {
-		t.Error("both should be valid")
-	}
-}
-
-func TestRedirectURIWildcard(t *testing.T) {
-	cfg := &Config{RedirectURIs: []string{"*"}}
-	if !cfg.IsValidRedirectURI("http://anything") {
-		t.Error("wildcard should allow any URI")
-	}
-}
-
-func TestRedirectURIExact(t *testing.T) {
-	cfg := &Config{RedirectURIs: []string{"http://localhost/callback"}}
-	if !cfg.IsValidRedirectURI("http://localhost/callback") {
-		t.Error("exact match should pass")
-	}
-	if cfg.IsValidRedirectURI("http://other/callback") {
-		t.Error("non-matching should fail")
-	}
-}
-
 func TestNormalizedBasePath(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -152,10 +109,7 @@ func TestLoadFromStore(t *testing.T) {
 		"refresh_token_lifetime": "172800",
 		"display_name":           "My IDP",
 	}
-	sliceData := map[string][]string{
-		"client_ids":    {"app1", "app2"},
-		"redirect_uris": {"http://localhost/cb"},
-	}
+	sliceData := map[string][]string{}
 	mapData := map[string]map[string]string{
 		"group_mappings": {"guid1": "Admin"},
 	}
@@ -192,8 +146,5 @@ func TestLoadFromStore(t *testing.T) {
 	}
 	if cfg.DisplayName != "My IDP" {
 		t.Errorf("expected My IDP, got %s", cfg.DisplayName)
-	}
-	if len(cfg.ClientIDs) != 2 {
-		t.Errorf("expected 2 client IDs, got %d", len(cfg.ClientIDs))
 	}
 }
